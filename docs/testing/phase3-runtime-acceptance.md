@@ -4,6 +4,8 @@
 - **Dự án:** SMART PARKING SYSTEM — ESP32 DevKit + RFID RC522 + Camera AI + FreeRTOS + FastAPI + React
 - **GitHub Repository:** [https://github.com/kudohieu1209/smart-parking-system](https://github.com/kudohieu1209/smart-parking-system)
 - **Branch:** `main`
+- **Verified Commit:** [`4881ad3`](https://github.com/kudohieu1209/smart-parking-system/commit/4881ad3)
+- **GitHub Actions Run:** [Run #41298994704 (100% SUCCESS)](https://github.com/kudohieu1209/smart-parking-system/actions/runs/41298994704)
 - **Phiên bản:** Phase 3.3 — Final Embedded Simulation & CI Hardening
 - **Ngày thực hiện:** 01/11/2026
 
