@@ -9,6 +9,7 @@
 #include <driver/i2c.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_rom_sys.h>
 
 #include "display_lcd.h"
 #include "pin_config.h"

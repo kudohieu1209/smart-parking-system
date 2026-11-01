@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "display_lcd.c"
     INCLUDE_DIRS "include"
-    REQUIRES "parking_core" "driver"
+    REQUIRES "parking_core" "driver" "esp_rom"
 )

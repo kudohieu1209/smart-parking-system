@@ -16,6 +16,10 @@
 #include "network_client.h"
 #include "pin_config.h"
 
+#if defined(CONFIG_SMART_PARKING_SIMULATION_OFFLINE_DEMO)
+#warning "SECURITY NOTICE: SMART_PARKING_SIMULATION_OFFLINE_DEMO is ENABLED. Only for Wokwi offline simulation. NEVER deploy to real hardware!"
+#endif
+
 static const char *TAG = "NET_CLIENT";
 
 static bool g_wifi_connected = false;
@@ -193,44 +197,59 @@ esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_post_field(client, post_data, strlen(post_data));
 
+    int status_code = 0;
+    int read_len = 0;
     esp_err_t err = esp_http_client_open(client, strlen(post_data));
     if (err == ESP_OK) {
         esp_http_client_write(client, post_data, strlen(post_data));
-        int content_length = esp_http_client_fetch_headers(client);
-        if (content_length > 0 && content_length < (int)sizeof(response_buffer)) {
-            esp_http_client_read(client, response_buffer, sizeof(response_buffer) - 1);
+        esp_http_client_fetch_headers(client);
+        status_code = esp_http_client_get_status_code(client);
+        read_len = esp_http_client_read(client, response_buffer, sizeof(response_buffer) - 1);
+        if (read_len > 0) {
+            response_buffer[read_len] = '\0';
         }
+    } else {
+        status_code = esp_http_client_get_status_code(client);
     }
 
     esp_http_client_cleanup(client);
     free(post_data);
 
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to connect to backend: %s. Fail-safe: Barrier stays CLOSED.", esp_err_to_name(err));
+    if (err != ESP_OK || status_code != 200 || read_len <= 0) {
+        ESP_LOGE(TAG, "Backend HTTP communication failed: err=%s, status=%d, bytes=%d. Fail-safe: Barrier stays CLOSED.",
+                 esp_err_to_name(err), status_code, read_len);
         if (out_allowed) *out_allowed = false;
-        if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Backend Unreachable");
-        return err;
+        if (out_msg && msg_len > 0) {
+            snprintf(out_msg, msg_len, "Backend Error (HTTP %d)", status_code);
+        }
+        return (err != ESP_OK) ? err : ESP_FAIL;
     }
 
     // Phân tích phản hồi JSON từ FastAPI
     cJSON *resp_json = cJSON_Parse(response_buffer);
     if (!resp_json) {
-        ESP_LOGE(TAG, "Invalid JSON received from backend: %s", response_buffer);
+        ESP_LOGE(TAG, "Invalid or unparseable JSON received from backend: %s", response_buffer);
         if (out_allowed) *out_allowed = false;
-        if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Invalid Response");
+        if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Invalid Response Payload");
         return ESP_ERR_INVALID_RESPONSE;
     }
 
     cJSON *status_item = cJSON_GetObjectItem(resp_json, "status");
+    cJSON *action_item = cJSON_GetObjectItem(resp_json, "action");
     cJSON *msg_item = cJSON_GetObjectItem(resp_json, "message");
 
-    if (status_item && cJSON_IsString(status_item) && strcmp(status_item->valuestring, "ALLOWED") == 0) {
+    // BẮT BUỘC KIỂM TRA ĐẦY ĐỦ CẢ HAI TRƯỜNG: status == "ALLOWED" VÀ action == "OPEN_BARRIER"
+    bool is_allowed = (status_item && cJSON_IsString(status_item) && strcmp(status_item->valuestring, "ALLOWED") == 0);
+    bool is_open_action = (action_item && cJSON_IsString(action_item) && strcmp(action_item->valuestring, "OPEN_BARRIER") == 0);
+
+    if (is_allowed && is_open_action) {
         if (out_allowed) *out_allowed = true;
-        ESP_LOGI(TAG, "Backend Authorization: ALLOWED -> Opening barrier.");
+        ESP_LOGI(TAG, "Backend Authorization: ALLOWED & OPEN_BARRIER -> Raising barrier.");
     } else {
         if (out_allowed) *out_allowed = false;
-        ESP_LOGW(TAG, "Backend Authorization: REJECTED (%s) -> Keeping barrier closed.",
-                 (msg_item && cJSON_IsString(msg_item)) ? msg_item->valuestring : "Denied");
+        ESP_LOGW(TAG, "Backend Authorization: REJECTED or INCOMPLETE (status=%s, action=%s) -> Keeping barrier closed.",
+                 (status_item && cJSON_IsString(status_item)) ? status_item->valuestring : "UNKNOWN",
+                 (action_item && cJSON_IsString(action_item)) ? action_item->valuestring : "UNKNOWN");
     }
 
     if (out_msg && msg_len > 0 && msg_item && cJSON_IsString(msg_item)) {

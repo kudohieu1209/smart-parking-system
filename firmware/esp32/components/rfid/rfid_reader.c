@@ -10,6 +10,7 @@
 #include <driver/gpio.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_rom_sys.h>
 
 #include "rfid_reader.h"
 #include "pin_config.h"

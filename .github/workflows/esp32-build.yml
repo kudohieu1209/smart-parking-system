@@ -1,0 +1,91 @@
+name: ESP32 Firmware CI Build & Verification
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-esp32-firmware:
+    name: Build ESP32 Firmware (ESP-IDF v5.3)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Build ESP-IDF Project
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3
+          target: esp32
+          path: 'firmware/esp32'
+
+      - name: Verify and list build artifacts
+        run: |
+          echo "=========================================="
+          echo "ESP32 FIRMWARE BUILD ARTIFACTS VERIFICATION"
+          echo "=========================================="
+          ls -lah firmware/esp32/build/
+          echo "Checking binary files..."
+          test -f firmware/esp32/build/smart_parking_esp32.bin && echo "[OK] smart_parking_esp32.bin exists"
+          test -f firmware/esp32/build/smart_parking_esp32.elf && echo "[OK] smart_parking_esp32.elf exists"
+          test -f firmware/esp32/build/flasher_args.json && echo "[OK] flasher_args.json exists"
+          test -f firmware/esp32/build/bootloader/bootloader.bin && echo "[OK] bootloader.bin exists"
+          test -f firmware/esp32/build/partition_table/partition-table.bin && echo "[OK] partition-table.bin exists"
+          echo "=========================================="
+          cat firmware/esp32/build/flasher_args.json
+          echo "=========================================="
+
+      - name: Upload Firmware Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware-binaries
+          path: |
+            firmware/esp32/build/smart_parking_esp32.bin
+            firmware/esp32/build/smart_parking_esp32.elf
+            firmware/esp32/build/flasher_args.json
+            firmware/esp32/build/bootloader/bootloader.bin
+            firmware/esp32/build/partition_table/partition-table.bin
+          if-no-files-found: error
+
+  regression-tests:
+    name: Full System Regression Tests (Backend, Vision & Frontend)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install -r vision/requirements.txt
+          pip install pytest httpx
+
+      - name: Run Pytest Test Suite
+        run: |
+          python -m pytest -v
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build Frontend
+        run: |
+          npm --prefix frontend install
+          npm --prefix frontend run build
