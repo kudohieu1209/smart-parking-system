@@ -2,17 +2,22 @@
  * @file main.c
  * @brief Smart Parking System - ESP32 Firmware Core Application
  * 
- * Kiến trúc đa nhiệm FreeRTOS:
- * 1. sensor_task: Đọc 4 cảm biến siêu âm HC-SR04 định kỳ 500ms
- * 2. rfid_task: Lắng nghe sự kiện quẹt thẻ RFID tại cổng vào/ra
- * 3. barrier_task: Giám sát an toàn và điều khiển đóng/mở barrier
- * 4. network_task: Đồng bộ telemetry và nhận chỉ thị từ Backend
+ * KIẾN TRÚC ĐA NHIỆM FREERTOS CHUẨN CÔNG NGHIỆP:
+ * 1. sensor_task (Core 1, Priority 5): Đọc 4 cảm biến siêu âm HC-SR04, áp dụng bộ lọc & hysteresis
+ * 2. rfid_task (Core 1, Priority 6): Quét thẻ 2 đầu đọc MFRC522 qua SPI, xác thực backend và mở cổng
+ * 3. barrier_task (Core 0, Priority 4): Máy trạng thái đếm lùi non-blocking, giám sát chùm tia quang an toàn
+ * 4. network_task (Core 0, Priority 3): Đồng bộ telemetry cảm biến lên FastAPI REST API
+ * 5. display_task (Core 0, Priority 2): Cập nhật màn hình LCD 1602 I2C
+ * 
+ * BẢO VỆ ĐỒNG BỘ:
+ * - FreeRTOS Mutex (g_telemetry_mutex) bảo vệ an toàn luồng khi chia sẻ dữ liệu ô đỗ giữa Core 0 và Core 1.
  */
 
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_system.h"
 
@@ -26,67 +31,110 @@
 
 static const char *TAG = "MAIN_APP";
 
-// Biến lưu trạng thái 4 ô đỗ
+// Biến chia sẻ toàn cục trạng thái 4 ô đỗ và khóa Mutex
 static slot_telemetry_t g_slots[MAX_SLOTS];
+static SemaphoreHandle_t g_telemetry_mutex = NULL;
 
 // ==============================================================================
 // FREERTOS TASKS
 // ==============================================================================
 
+/**
+ * @brief Tác vụ đọc cảm biến siêu âm trên Core 1 (Ưu tiên cao).
+ */
 static void sensor_task(void *pvParameters) {
-    ESP_LOGI(TAG, "Sensor task started on Core %d", xPortGetCoreID());
+    ESP_LOGI(TAG, "Sensor task active on Core %d", xPortGetCoreID());
+    slot_telemetry_t local_slots[MAX_SLOTS];
+
     while (1) {
-        ultrasonic_sensor_read_all(g_slots);
+        // Đọc phần cứng tuần tự
+        ultrasonic_sensor_read_all(local_slots);
+
+        // Cập nhật vào vùng nhớ chia sẻ với khóa Mutex
+        if (g_telemetry_mutex && xSemaphoreTake(g_telemetry_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            memcpy(g_slots, local_slots, sizeof(g_slots));
+            xSemaphoreGive(g_telemetry_mutex);
+        }
+
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
+/**
+ * @brief Tác vụ quét thẻ RFID trên Core 1 (Ưu tiên cao nhất).
+ */
 static void rfid_task(void *pvParameters) {
-    ESP_LOGI(TAG, "RFID task started on Core %d", xPortGetCoreID());
+    ESP_LOGI(TAG, "RFID polling task active on Core %d", xPortGetCoreID());
     char card_uid[32];
+
     while (1) {
-        // Quét cổng vào
+        // 1. Quét đầu đọc Cổng Vào
         if (rfid_reader_poll(GATE_ENTRY, card_uid, sizeof(card_uid)) == ESP_OK) {
-            ESP_LOGI(TAG, "Entry Tap Detected: %s", card_uid);
+            ESP_LOGI(TAG, ">>> ENTRY TAP: Card UID = %s <<<", card_uid);
+            display_lcd_show_status(4, "ENTRY TAP CHECK");
+
             bool allowed = false;
             char msg[64] = {0};
-            if (network_send_rfid_tap(GATE_ENTRY, card_uid, &allowed, msg, sizeof(msg)) == ESP_OK && allowed) {
+            esp_err_t net_ret = network_send_rfid_tap(GATE_ENTRY, card_uid, &allowed, msg, sizeof(msg));
+
+            if (net_ret == ESP_OK && allowed) {
+                ESP_LOGI(TAG, "Entry Granted! Raising barrier.");
+                display_lcd_show_status(4, "WELCOME! OPEN");
                 barrier_open(GATE_ENTRY);
+            } else {
+                ESP_LOGW(TAG, "Entry Denied: %s", msg);
+                display_lcd_show_status(4, "ACCESS DENIED");
             }
+
+            // Chờ nhả thẻ để tránh quét lặp liên tục
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
-        // Quét cổng ra
+        // 2. Quét đầu đọc Cổng Ra
         if (rfid_reader_poll(GATE_EXIT, card_uid, sizeof(card_uid)) == ESP_OK) {
-            ESP_LOGI(TAG, "Exit Tap Detected: %s", card_uid);
+            ESP_LOGI(TAG, ">>> EXIT TAP: Card UID = %s <<<", card_uid);
+            display_lcd_show_status(4, "EXIT TAP CHECK");
+
             bool allowed = false;
             char msg[64] = {0};
-            if (network_send_rfid_tap(GATE_EXIT, card_uid, &allowed, msg, sizeof(msg)) == ESP_OK && allowed) {
+            esp_err_t net_ret = network_send_rfid_tap(GATE_EXIT, card_uid, &allowed, msg, sizeof(msg));
+
+            if (net_ret == ESP_OK && allowed) {
+                ESP_LOGI(TAG, "Exit Granted! Raising barrier.");
+                display_lcd_show_status(4, "GOODBYE! OPEN");
                 barrier_open(GATE_EXIT);
+            } else {
+                ESP_LOGW(TAG, "Exit Denied: %s", msg);
+                display_lcd_show_status(4, "ACCESS DENIED");
             }
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
         vTaskDelay(pdMS_TO_TICKS(150));
     }
 }
 
+/**
+ * @brief Tác vụ giám sát cảm biến an toàn và điều khiển đóng barrier (Core 0).
+ */
 static void barrier_task(void *pvParameters) {
-    ESP_LOGI(TAG, "Barrier safety monitor task started (non-blocking countdown state machine).");
+    ESP_LOGI(TAG, "Barrier safety monitor task active on Core %d", xPortGetCoreID());
     uint32_t clear_counter_ms[2] = {0, 0};
     const uint32_t poll_interval_ms = 100;
     const uint32_t required_clear_ms = 3000;
 
     while (1) {
-        // Tự động đóng barrier sau khi xe qua và liên tục không có vật cản trong 3s
         for (int gate = 0; gate < 2; gate++) {
-            if (barrier_get_state(gate) == BARRIER_OPEN) {
-                if (barrier_is_obstruction_detected(gate)) {
-                    // Nếu phát hiện vật cản trong chùm tia an toàn, lập tức xóa bộ đếm đóng
+            if (barrier_get_state((gate_id_t)gate) == BARRIER_OPEN) {
+                if (barrier_is_obstruction_detected((gate_id_t)gate)) {
+                    // CÓ VẬT CẢN: Lập tức xóa bộ đếm đóng, bảo đảm không hạ barrier
                     clear_counter_ms[gate] = 0;
                 } else {
-                    // Liên tục an toàn: tăng bộ đếm
+                    // THÔNG THOÁNG: Tích lũy thời gian an toàn
                     clear_counter_ms[gate] += poll_interval_ms;
                     if (clear_counter_ms[gate] >= required_clear_ms) {
-                        barrier_close(gate);
+                        barrier_close((gate_id_t)gate);
                         clear_counter_ms[gate] = 0;
                     }
                 }
@@ -98,25 +146,72 @@ static void barrier_task(void *pvParameters) {
     }
 }
 
+/**
+ * @brief Tác vụ truyền thông gửi số liệu cảm biến lên Backend (Core 0).
+ */
 static void network_task(void *pvParameters) {
-    ESP_LOGI(TAG, "Network telemetry task started.");
+    ESP_LOGI(TAG, "Network telemetry task active on Core %d", xPortGetCoreID());
+    slot_telemetry_t snapshot[MAX_SLOTS];
+
     while (1) {
-        network_send_telemetry(g_slots);
+        // Lấy snapshot dữ liệu an toàn với khóa Mutex
+        if (g_telemetry_mutex && xSemaphoreTake(g_telemetry_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            memcpy(snapshot, g_slots, sizeof(snapshot));
+            xSemaphoreGive(g_telemetry_mutex);
+
+            // Gửi dữ liệu lên REST API Backend
+            network_send_telemetry(snapshot);
+        }
+
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 
+/**
+ * @brief Tác vụ cập nhật màn hình LCD 1602 (Core 0, Ưu tiên thấp).
+ */
+static void display_task(void *pvParameters) {
+    ESP_LOGI(TAG, "Display LCD update task active on Core %d", xPortGetCoreID());
+
+    while (1) {
+        int free_slots = 0;
+        if (g_telemetry_mutex && xSemaphoreTake(g_telemetry_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            for (int i = 0; i < MAX_SLOTS; i++) {
+                if (!g_slots[i].occupied) free_slots++;
+            }
+            xSemaphoreGive(g_telemetry_mutex);
+        }
+
+        display_lcd_show_status(free_slots, "PARKING ONLINE");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 // ==============================================================================
-// ENTRY POINT
+// APPLICATION ENTRY POINT
 // ==============================================================================
 
 void app_main(void) {
-    ESP_LOGI(TAG, "================================================");
-    ESP_LOGI(TAG, "SMART PARKING SYSTEM FIRMWARE INITIALIZING");
-    ESP_LOGI(TAG, "Target: ESP32 | FreeRTOS Architecture");
-    ESP_LOGI(TAG, "================================================");
+    ESP_LOGI(TAG, "=====================================================");
+    ESP_LOGI(TAG, "  SMART PARKING SYSTEM — ESP32 EMBEDDED FIRMWARE     ");
+    ESP_LOGI(TAG, "  Architecture: FreeRTOS Symmetric Multiprocessing    ");
+    ESP_LOGI(TAG, "=====================================================");
 
-    // 1. Khởi tạo phần cứng trừu tượng
+    // 1. Tạo khóa Mutex bảo vệ dữ liệu telemetry
+    g_telemetry_mutex = xSemaphoreCreateMutex();
+    if (!g_telemetry_mutex) {
+        ESP_LOGE(TAG, "Failed to create telemetry mutex!");
+    }
+
+    // 2. Khởi tạo mảng ô đỗ mặc định
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        snprintf(g_slots[i].slot_id, sizeof(g_slots[i].slot_id), "P0%d", i + 1);
+        g_slots[i].distance_cm = 120.0f;
+        g_slots[i].occupied = false;
+        g_slots[i].last_update_ms = 0;
+    }
+
+    // 3. Khởi tạo các tầng trừu tượng phần cứng (HAL)
     ultrasonic_sensor_init();
     rfid_reader_init();
     barrier_controller_init();
@@ -125,11 +220,15 @@ void app_main(void) {
 
     display_lcd_show_status(4, "SYSTEM READY");
 
-    // 2. Tạo các tác vụ FreeRTOS độc lập
+    // 4. Khởi chạy các FreeRTOS Tasks trên cả 2 Core
+    // Core 1: Dành riêng cho Realtime I/O (Cảm biến siêu âm & SPI RFID)
     xTaskCreatePinnedToCore(sensor_task, "sensor_task", 4096, NULL, 5, NULL, 1);
     xTaskCreatePinnedToCore(rfid_task, "rfid_task", 4096, NULL, 6, NULL, 1);
+
+    // Core 0: Dành riêng cho Networking, Barrier Logic & LCD Display
     xTaskCreatePinnedToCore(barrier_task, "barrier_task", 3072, NULL, 4, NULL, 0);
     xTaskCreatePinnedToCore(network_task, "network_task", 4096, NULL, 3, NULL, 0);
+    xTaskCreatePinnedToCore(display_task, "display_task", 3072, NULL, 2, NULL, 0);
 
-    ESP_LOGI(TAG, "All FreeRTOS tasks launched successfully.");
+    ESP_LOGI(TAG, "All 5 FreeRTOS Tasks successfully launched across Core 0 and Core 1.");
 }
