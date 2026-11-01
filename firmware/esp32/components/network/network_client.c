@@ -124,7 +124,7 @@ esp_err_t network_send_telemetry(const slot_telemetry_t slots[MAX_SLOTS]) {
     cJSON_Delete(root);
     if (!post_data) return ESP_ERR_NO_MEM;
 
-    char url[128];
+    char url[256];
     snprintf(url, sizeof(url), "%s/telemetry/sensors", s_backend_url);
 
     esp_http_client_config_t config = {
@@ -175,7 +175,7 @@ esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_
     }
 
     // Kết nối HTTP tới Backend
-    char url[128];
+    char url[256];
     const char *endpoint = (gate == GATE_ENTRY) ? "/gate/entry-tap" : "/gate/exit-tap";
     snprintf(url, sizeof(url), "%s%s", s_backend_url, endpoint);
 

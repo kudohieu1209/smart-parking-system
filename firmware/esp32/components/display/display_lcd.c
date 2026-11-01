@@ -123,11 +123,14 @@ esp_err_t display_lcd_init(void) {
 }
 
 esp_err_t display_lcd_show_status(int available_slots, const char *message) {
-    char line1[17];
-    char line2[17];
+    char line1[32];
+    char line2[32];
 
     snprintf(line1, sizeof(line1), "SLOTS: %d/4 FREE ", available_slots);
-    snprintf(line2, sizeof(line2), "%-16s", message ? message : "SYSTEM READY");
+    snprintf(line2, sizeof(line2), "%-16.16s", message ? message : "SYSTEM READY");
+
+    line1[16] = '\0';
+    line2[16] = '\0';
 
     lcd_set_cursor(0, 0);
     lcd_write_string(line1);
