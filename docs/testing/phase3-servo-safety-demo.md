@@ -3,9 +3,11 @@
 - **Dự án:** SMART PARKING SYSTEM — ESP32 DevKit + Servo SG90 + IR Safety Interlock + RFID RC522
 - **Module:** `firmware/esp32/components/barrier/barrier_controller.c`, `network_client.c`, `main.c`
 - **Phiên bản:** Phase 3 — Servo Barrier & Safety Interlock Verification
+- **Commit Hash:** `942eb7e`
+- **GitHub Actions Run:** [#41311346380](https://github.com/kudohieu1209/smart-parking-system/actions/runs/41311346380)
 - **Artifact GitHub Actions:**
-  - Bản Demo Wokwi: `esp32-wokwi-demo-only` (Chứa `smart_parking_wokwi_demo_merged.bin`)
-  - Bản Production: `esp32-firmware-binaries` (Chứa `smart_parking_esp32_merged.bin`)
+  - Bản Demo Wokwi: [`esp32-wokwi-demo-only`](https://github.com/kudohieu1209/smart-parking-system/actions/runs/41311346380) (Chứa `smart_parking_wokwi_demo_merged.bin`, 4.7 MB)
+  - Bản Production: [`esp32-firmware-binaries`](https://github.com/kudohieu1209/smart-parking-system/actions/runs/41311346380) (Chứa `smart_parking_esp32_merged.bin`, 5.3 MB)
 
 ---
 
