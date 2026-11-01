@@ -32,6 +32,8 @@ export interface SystemStats {
   barrier_exit_obstruction: boolean;
   is_simulation_mode: boolean;
   system_mode: string;
+  esp32_online?: boolean;
+  camera_online?: boolean;
 }
 
 

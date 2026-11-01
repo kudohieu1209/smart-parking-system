@@ -21,9 +21,20 @@ esp_err_t network_send_telemetry(const slot_telemetry_t slots[MAX_SLOTS]) {
 
 esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_allowed, char *out_msg, size_t msg_len) {
     ESP_LOGI(TAG, "Transmitting RFID tap for gate %d, Card: %s", gate, card_uid);
+    // Security fail-safe: Default to rejected unless backend explicitly returns ALLOWED
+    if (out_allowed) *out_allowed = false;
+
+#if defined(CONFIG_SMART_PARKING_SIMULATION_STUB)
+    // Stub mode for isolated unit testing
     if (out_allowed) *out_allowed = true;
+    if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Card verified (Sim Stub)");
+    return ESP_OK;
+#else
+    // Production / Hardware mode: Must parse JSON response from FastAPI /api/v1/gate/*-tap
+    // Fail-safe: Keep false if backend unreachable or rejects card
     if (out_msg && msg_len > 0) {
-        snprintf(out_msg, msg_len, "Card verified");
+        snprintf(out_msg, msg_len, "Awaiting Backend Verification");
     }
     return ESP_OK;
+#endif
 }

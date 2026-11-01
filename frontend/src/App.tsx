@@ -46,19 +46,25 @@ export const App: React.FC = () => {
   };
 
   useEffect(() => {
+    let isMounted = true;
+    let reconnectTimer: any = null;
+
     loadData();
 
     // WebSocket Realtime connection
     const connectWs = () => {
+      if (!isMounted) return;
       const ws = new WebSocket(WS_BASE);
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (!isMounted) return;
         setWsConnected(true);
         console.log('[WS] Connected to live event stream');
       };
 
       ws.onmessage = (event) => {
+        if (!isMounted) return;
         try {
           const msg = JSON.parse(event.data);
 
@@ -86,9 +92,10 @@ export const App: React.FC = () => {
       };
 
       ws.onclose = () => {
+        if (!isMounted) return;
         setWsConnected(false);
         console.log('[WS] Disconnected. Reconnecting in 3s...');
-        setTimeout(connectWs, 3000);
+        reconnectTimer = setTimeout(connectWs, 3000);
       };
 
       ws.onerror = () => {
@@ -99,6 +106,8 @@ export const App: React.FC = () => {
     connectWs();
 
     return () => {
+      isMounted = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (wsRef.current) wsRef.current.close();
     };
   }, []);
@@ -203,10 +212,10 @@ export const App: React.FC = () => {
               borderRadius: 8,
               border: '1px solid #1e293b',
               fontSize: '0.75rem',
-              color: '#38bdf8',
+              color: stats?.esp32_online ? '#38bdf8' : '#f87171',
             }}
           >
-            <Cpu size={14} /> HAL: {stats?.system_mode || 'SIMULATION'}
+            <Cpu size={14} /> ESP32: {stats?.esp32_online ? 'ONLINE' : 'STALE'}
           </div>
 
           <div
@@ -219,10 +228,10 @@ export const App: React.FC = () => {
               borderRadius: 8,
               border: '1px solid #1e293b',
               fontSize: '0.75rem',
-              color: '#c084fc',
+              color: stats?.camera_online ? '#c084fc' : '#f87171',
             }}
           >
-            <Camera size={14} /> Camera AI (4 ROI)
+            <Camera size={14} /> Camera AI: {stats?.camera_online ? 'ACTIVE' : 'OFFLINE'}
           </div>
 
           <button

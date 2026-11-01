@@ -30,11 +30,13 @@ def test_get_slots(client):
     assert "P04" in slot_ids
 
 def test_entry_and_exit_tap_flow(client):
-    # Ensure any lingering test session for this card is cleaned up
+    # Ensure any lingering test sessions are cleaned up and slots are empty
     from backend.app.database.session import SessionLocal
-    from backend.app.models.parking import ParkingSession
+    from backend.app.models.parking import ParkingSession, ParkingSlot
     db = SessionLocal()
-    db.query(ParkingSession).filter(ParkingSession.card_uid == "RFID-DEMO-01").delete()
+    db.query(ParkingSession).delete()
+    for s in db.query(ParkingSlot).all():
+        s.status = "EMPTY"
     db.commit()
     db.close()
 

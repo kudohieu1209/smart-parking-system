@@ -111,6 +111,7 @@ async def ingest_sensor_telemetry(payload: SensorTelemetryRequest, db: Session =
     return {"status": "SUCCESS", "processed_count": len(payload.readings)}
 
 @api_router.post("/vision/occupancy")
+@api_router.post("/telemetry/vision")
 async def ingest_vision_telemetry(payload: VisionTelemetryRequest, db: Session = Depends(get_db)):
     await ParkingService.update_vision_telemetry(db, payload.slots)
     return {"status": "SUCCESS", "processed_count": len(payload.slots)}
@@ -194,6 +195,7 @@ def get_stats(db: Session = Depends(get_db)):
     return SystemStatsResponse(**stats)
 
 @api_router.get("/system/alerts", response_model=list[AlertResponse])
+@api_router.get("/alerts", response_model=list[AlertResponse])
 def get_alerts(limit: int = 20, db: Session = Depends(get_db)):
     alerts = db.query(SystemAlert).order_by(SystemAlert.created_at.desc()).limit(limit).all()
     return [AlertResponse.model_validate(a) for a in alerts]
@@ -203,6 +205,9 @@ def get_alerts(limit: int = 20, db: Session = Depends(get_db)):
 # ==============================================================================
 @api_router.post("/simulator/slot-toggle")
 async def simulator_toggle_slot(payload: SimulatorSlotToggleRequest, db: Session = Depends(get_db)):
+    if get_hardware_adapter().get_mode() != "SIMULATION":
+        raise HTTPException(status_code=403, detail="Simulator endpoints disabled in HARDWARE mode")
+
     slot = db.query(ParkingSlot).filter(ParkingSlot.slot_id == payload.slot_id.upper()).first()
     if not slot:
         raise HTTPException(status_code=404, detail="Slot not found")
@@ -230,6 +235,9 @@ async def simulator_toggle_slot(payload: SimulatorSlotToggleRequest, db: Session
 
 @api_router.post("/simulator/inject-mismatch")
 async def simulator_inject_mismatch(payload: SimulatorMismatchRequest, db: Session = Depends(get_db)):
+    if get_hardware_adapter().get_mode() != "SIMULATION":
+        raise HTTPException(status_code=403, detail="Simulator endpoints disabled in HARDWARE mode")
+
     slot = db.query(ParkingSlot).filter(ParkingSlot.slot_id == payload.slot_id.upper()).first()
     if not slot:
         raise HTTPException(status_code=404, detail="Slot not found")
@@ -242,13 +250,27 @@ async def simulator_inject_mismatch(payload: SimulatorMismatchRequest, db: Sessi
     slot.updated_at = datetime.now(timezone.utc)
 
     if slot.has_mismatch:
-        alert = SystemAlert(
-            alert_type="SENSOR_CAMERA_MISMATCH",
-            slot_id=slot.slot_id,
-            severity="WARNING",
-            message=f"[Mô phỏng] Sai lệch trạng thái tại {slot.slot_id}: Cảm biến={payload.sensor_occupied}, Camera={payload.camera_occupied}"
-        )
-        db.add(alert)
+        existing_alert = db.query(SystemAlert).filter(
+            SystemAlert.alert_type == "SENSOR_CAMERA_MISMATCH",
+            SystemAlert.slot_id == slot.slot_id,
+            SystemAlert.is_resolved == False
+        ).first()
+        if not existing_alert:
+            alert = SystemAlert(
+                alert_type="SENSOR_CAMERA_MISMATCH",
+                slot_id=slot.slot_id,
+                severity="WARNING",
+                message=f"[Mô phỏng] Sai lệch trạng thái tại {slot.slot_id}: Cảm biến={payload.sensor_occupied}, Camera={payload.camera_occupied}"
+            )
+            db.add(alert)
+    else:
+        existing_alert = db.query(SystemAlert).filter(
+            SystemAlert.alert_type == "SENSOR_CAMERA_MISMATCH",
+            SystemAlert.slot_id == slot.slot_id,
+            SystemAlert.is_resolved == False
+        ).first()
+        if existing_alert:
+            existing_alert.is_resolved = True
 
     db.commit()
 
@@ -267,7 +289,10 @@ async def simulator_inject_mismatch(payload: SimulatorMismatchRequest, db: Sessi
 
 @api_router.post("/simulator/reset")
 async def simulator_reset(db: Session = Depends(get_db)):
-    # Reset 4 slots to EMPTY
+    if get_hardware_adapter().get_mode() != "SIMULATION":
+        raise HTTPException(status_code=403, detail="Simulator endpoints disabled in HARDWARE mode")
+
+    # 1. Reset 4 slots to EMPTY
     slots = db.query(ParkingSlot).all()
     for s in slots:
         s.status = "EMPTY"
@@ -275,6 +300,17 @@ async def simulator_reset(db: Session = Depends(get_db)):
         s.sensor_occupied = False
         s.camera_occupied = False
         s.has_mismatch = False
+
+    # 2. Complete all active sessions for clean simulator restart
+    active_sessions = db.query(ParkingSession).filter(ParkingSession.status == "ACTIVE").all()
+    for sess in active_sessions:
+        sess.status = "COMPLETED"
+        sess.exit_time = datetime.now(timezone.utc)
+
+    # 3. Ensure all RFID cards are active
+    cards = db.query(RFIDCard).all()
+    for c in cards:
+        c.is_active = True
 
     adapter = get_hardware_adapter()
     adapter.set_safety_sensor("ENTRY", False)
@@ -287,7 +323,7 @@ async def simulator_reset(db: Session = Depends(get_db)):
     await ws_manager.broadcast({
         "event_type": "SYSTEM_RESET",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "data": {"message": "All slots reset to EMPTY, barriers CLOSED"}
+        "data": {"message": "All slots reset to EMPTY, active sessions cleared, barriers CLOSED"}
     })
     return {"message": "System reset completed"}
 

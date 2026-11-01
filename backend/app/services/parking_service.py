@@ -1,5 +1,7 @@
 import math
+import asyncio
 from datetime import datetime, timezone
+from typing import Optional
 import logging
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -16,6 +18,10 @@ logger = logging.getLogger("parking_service")
 
 
 class ParkingService:
+    _entry_lock = asyncio.Lock()
+    last_sensor_telemetry_time: Optional[datetime] = None
+    last_vision_telemetry_time: Optional[datetime] = None
+
     @staticmethod
     def seed_initial_data(db: Session):
         """Khởi tạo 4 ô đỗ và danh sách thẻ demo nếu cơ sở dữ liệu trống."""
@@ -65,95 +71,100 @@ class ParkingService:
 
     @staticmethod
     async def process_entry_tap(db: Session, tap: CardTapRequest) -> GateTapResponse:
-        """Quy tắc xử lý quẹt thẻ vào cổng (Check-in)."""
-        card = db.query(RFIDCard).filter(RFIDCard.card_uid == tap.card_uid).first()
-        if not card or not card.is_active:
-            reason = "CARD_INACTIVE" if card and not card.is_active else "CARD_UNKNOWN"
-            msg = "Thẻ đã bị khóa hoặc ngừng kích hoạt." if reason == "CARD_INACTIVE" else "Thẻ không hợp lệ hoặc chưa từng đăng ký."
-            await ws_manager.broadcast({
-                "event_type": "GATE_ACTION",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "data": {"gate_id": "ENTRY", "status": "REJECTED", "reason": reason, "card_uid": tap.card_uid}
-            })
-            return GateTapResponse(
-                status="REJECTED",
-                action="KEEP_CLOSED",
-                gate_id="ENTRY",
-                message=msg,
-                reason=reason
-            )
+        """Quy tắc xử lý quẹt thẻ vào cổng (Check-in) với khóa đồng bộ tránh race conditions."""
+        async with ParkingService._entry_lock:
+            card = db.query(RFIDCard).filter(RFIDCard.card_uid == tap.card_uid).first()
+            if not card or not card.is_active:
+                reason = "CARD_INACTIVE" if card and not card.is_active else "CARD_UNKNOWN"
+                msg = "Thẻ đã bị khóa hoặc ngừng kích hoạt." if reason == "CARD_INACTIVE" else "Thẻ không hợp lệ hoặc chưa từng đăng ký."
+                await ws_manager.broadcast({
+                    "event_type": "GATE_ACTION",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "data": {"gate_id": "ENTRY", "status": "REJECTED", "reason": reason, "card_uid": tap.card_uid}
+                })
+                return GateTapResponse(
+                    status="REJECTED",
+                    action="KEEP_CLOSED",
+                    gate_id="ENTRY",
+                    message=msg,
+                    reason=reason
+                )
 
-        # Kiểm tra Anti-passback: Thẻ đang có phiên ACTIVE hay không
-        active_session = db.query(ParkingSession).filter(
-            ParkingSession.card_uid == tap.card_uid,
-            ParkingSession.status == "ACTIVE"
-        ).first()
-        if active_session:
-            return GateTapResponse(
-                status="REJECTED",
-                action="KEEP_CLOSED",
-                gate_id="ENTRY",
-                message="Thẻ đang có phiên gửi xe chưa hoàn tất (Anti-passback).",
-                reason="CARD_ALREADY_IN_USE"
-            )
+            # Kiểm tra Anti-passback: Thẻ đang có phiên ACTIVE hay không
+            active_session = db.query(ParkingSession).filter(
+                ParkingSession.card_uid == tap.card_uid,
+                ParkingSession.status == "ACTIVE"
+            ).first()
+            if active_session:
+                return GateTapResponse(
+                    status="REJECTED",
+                    action="KEEP_CLOSED",
+                    gate_id="ENTRY",
+                    message="Thẻ đang có phiên gửi xe chưa hoàn tất (Anti-passback).",
+                    reason="CARD_ALREADY_IN_USE"
+                )
 
-        # Kiểm tra bãi còn chỗ trống hay không
-        available_slots = ParkingService.get_available_slots_count(db)
-        if available_slots <= 0:
-            # Ghi nhận cảnh báo bãi đầy
-            alert = SystemAlert(
-                alert_type="PARKING_FULL",
-                severity="WARNING",
-                message=f"Xe biển số {card.vehicle_plate} bị từ chối vào cổng do bãi đã đầy."
+            # Kiểm tra bãi còn chỗ trống: Kiểm tra cả số phiên ACTIVE và ô EMPTY thực tế
+            active_sessions_count = db.query(ParkingSession).filter(
+                ParkingSession.status == "ACTIVE"
+            ).count()
+            available_slots = ParkingService.get_available_slots_count(db)
+
+            if active_sessions_count >= 4 or available_slots <= 0:
+                # Ghi nhận cảnh báo bãi đầy
+                alert = SystemAlert(
+                    alert_type="PARKING_FULL",
+                    severity="WARNING",
+                    message=f"Xe biển số {card.vehicle_plate} bị từ chối vào cổng do bãi đã đầy ({active_sessions_count}/4 xe đang gửi)."
+                )
+                db.add(alert)
+                db.commit()
+                await ws_manager.broadcast({
+                    "event_type": "ALERT",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "data": {"type": "PARKING_FULL", "message": "Bãi đỗ xe đã đầy (0 chỗ trống)."}
+                })
+                return GateTapResponse(
+                    status="REJECTED",
+                    action="KEEP_CLOSED",
+                    gate_id="ENTRY",
+                    message="Bãi đỗ xe đã đầy. Không thể check-in.",
+                    reason="PARKING_FULL"
+                )
+
+            # Tạo phiên gửi xe mới
+            new_session = ParkingSession(
+                card_uid=card.card_uid,
+                vehicle_plate=card.vehicle_plate,
+                entry_time=datetime.now(timezone.utc),
+                status="ACTIVE"
             )
-            db.add(alert)
+            db.add(new_session)
             db.commit()
+            db.refresh(new_session)
+
+            # Mở barrier vào qua Hardware Adapter
+            adapter = get_hardware_adapter()
+            adapter.command_barrier("ENTRY", "OPEN")
+
+            session_dto = ParkingSessionResponse.model_validate(new_session)
             await ws_manager.broadcast({
-                "event_type": "ALERT",
+                "event_type": "SESSION_CREATED",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "data": {"type": "PARKING_FULL", "message": "Bãi đỗ xe đã đầy (0 chỗ trống)."}
+                "data": {
+                    "session": session_dto.model_dump(),
+                    "barrier_state": "OPEN",
+                    "gate_id": "ENTRY"
+                }
             })
+
             return GateTapResponse(
-                status="REJECTED",
-                action="KEEP_CLOSED",
+                status="ALLOWED",
+                action="OPEN_BARRIER",
                 gate_id="ENTRY",
-                message="Bãi đỗ xe đã đầy. Không thể check-in.",
-                reason="PARKING_FULL"
+                message=f"Chào mừng {card.owner_name} ({card.vehicle_plate})!",
+                session=session_dto
             )
-
-        # Tạo phiên gửi xe mới
-        new_session = ParkingSession(
-            card_uid=card.card_uid,
-            vehicle_plate=card.vehicle_plate,
-            entry_time=datetime.now(timezone.utc),
-            status="ACTIVE"
-        )
-        db.add(new_session)
-        db.commit()
-        db.refresh(new_session)
-
-        # Mở barrier vào qua Hardware Adapter
-        adapter = get_hardware_adapter()
-        adapter.command_barrier("ENTRY", "OPEN")
-
-        session_dto = ParkingSessionResponse.model_validate(new_session)
-        await ws_manager.broadcast({
-            "event_type": "SESSION_CREATED",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "data": {
-                "session": session_dto.model_dump(),
-                "barrier_state": "OPEN",
-                "gate_id": "ENTRY"
-            }
-        })
-
-        return GateTapResponse(
-            status="ALLOWED",
-            action="OPEN_BARRIER",
-            gate_id="ENTRY",
-            message=f"Chào mừng {card.owner_name} ({card.vehicle_plate})!",
-            session=session_dto
-        )
 
     @staticmethod
     async def process_exit_tap(db: Session, tap: CardTapRequest) -> GateTapResponse:
@@ -233,7 +244,8 @@ class ParkingService:
 
     @staticmethod
     async def update_sensor_telemetry(db: Session, readings: list[SensorReading]):
-        """Cập nhật dữ liệu từ cảm biến siêu âm ESP32."""
+        """Cập nhật dữ liệu từ cảm biến siêu âm ESP32 có xử lý trùng lặp cảnh báo."""
+        ParkingService.last_sensor_telemetry_time = datetime.now(timezone.utc)
         updated = []
         for r in readings:
             slot = db.query(ParkingSlot).filter(ParkingSlot.slot_id == r.slot_id).first()
@@ -249,15 +261,28 @@ class ParkingService:
 
             if has_mismatch:
                 slot.status = "MISMATCH"
-                alert = SystemAlert(
-                    alert_type="SENSOR_CAMERA_MISMATCH",
-                    slot_id=slot.slot_id,
-                    severity="WARNING",
-                    message=f"Bất thường tại ô {slot.slot_id}: Cảm biến báo {slot.sensor_occupied}, Camera báo {slot.camera_occupied}."
-                )
-                db.add(alert)
+                existing_alert = db.query(SystemAlert).filter(
+                    SystemAlert.alert_type == "SENSOR_CAMERA_MISMATCH",
+                    SystemAlert.slot_id == slot.slot_id,
+                    SystemAlert.is_resolved == False
+                ).first()
+                if not existing_alert:
+                    alert = SystemAlert(
+                        alert_type="SENSOR_CAMERA_MISMATCH",
+                        slot_id=slot.slot_id,
+                        severity="WARNING",
+                        message=f"Bất thường tại ô {slot.slot_id}: Cảm biến báo {slot.sensor_occupied}, Camera báo {slot.camera_occupied}."
+                    )
+                    db.add(alert)
             else:
                 slot.status = "OCCUPIED" if slot.sensor_occupied else "EMPTY"
+                existing_alert = db.query(SystemAlert).filter(
+                    SystemAlert.alert_type == "SENSOR_CAMERA_MISMATCH",
+                    SystemAlert.slot_id == slot.slot_id,
+                    SystemAlert.is_resolved == False
+                ).first()
+                if existing_alert:
+                    existing_alert.is_resolved = True
 
             updated.append(slot)
 
@@ -283,31 +308,75 @@ class ParkingService:
 
     @staticmethod
     async def update_vision_telemetry(db: Session, readings: list[VisionSlotReading]):
-        """Cập nhật dữ liệu từ module nhận diện Camera AI."""
+        """Cập nhật dữ liệu từ module nhận diện Camera AI với xử lý UNKNOWN/mất tín hiệu."""
+        ParkingService.last_vision_telemetry_time = datetime.now(timezone.utc)
         updated = []
         for r in readings:
             slot = db.query(ParkingSlot).filter(ParkingSlot.slot_id == r.slot_id).first()
             if not slot:
                 continue
-            is_occupied = (r.state.upper() == "OCCUPIED")
-            slot.camera_occupied = is_occupied
-            slot.camera_confidence = r.confidence
-            slot.updated_at = datetime.now(timezone.utc)
 
-            has_mismatch = (slot.sensor_occupied != slot.camera_occupied)
-            slot.has_mismatch = has_mismatch
+            raw_state = (r.state or "").upper()
+            if raw_state in ("UNKNOWN", "CAMERA_ERROR", "ERROR"):
+                slot.status = "UNKNOWN"
+                slot.camera_confidence = r.confidence
+                slot.updated_at = datetime.now(timezone.utc)
+                slot.has_mismatch = True
 
-            if has_mismatch:
-                slot.status = "MISMATCH"
-                alert = SystemAlert(
-                    alert_type="SENSOR_CAMERA_MISMATCH",
-                    slot_id=slot.slot_id,
-                    severity="WARNING",
-                    message=f"Thị giác AI tại {slot.slot_id} phát hiện trạng thái không khớp với cảm biến."
-                )
-                db.add(alert)
+                existing_lost = db.query(SystemAlert).filter(
+                    SystemAlert.alert_type == "CAMERA_SIGNAL_LOST",
+                    SystemAlert.slot_id == slot.slot_id,
+                    SystemAlert.is_resolved == False
+                ).first()
+                if not existing_lost:
+                    alert = SystemAlert(
+                        alert_type="CAMERA_SIGNAL_LOST",
+                        slot_id=slot.slot_id,
+                        severity="WARNING",
+                        message=f"Tín hiệu camera tại {slot.slot_id} không xác định hoặc bị gián đoạn ({raw_state})."
+                    )
+                    db.add(alert)
             else:
-                slot.status = "OCCUPIED" if slot.camera_occupied else "EMPTY"
+                is_occupied = (raw_state == "OCCUPIED")
+                slot.camera_occupied = is_occupied
+                slot.camera_confidence = r.confidence
+                slot.updated_at = datetime.now(timezone.utc)
+
+                has_mismatch = (slot.sensor_occupied != slot.camera_occupied)
+                slot.has_mismatch = has_mismatch
+
+                if has_mismatch:
+                    slot.status = "MISMATCH"
+                    existing_alert = db.query(SystemAlert).filter(
+                        SystemAlert.alert_type == "SENSOR_CAMERA_MISMATCH",
+                        SystemAlert.slot_id == slot.slot_id,
+                        SystemAlert.is_resolved == False
+                    ).first()
+                    if not existing_alert:
+                        alert = SystemAlert(
+                            alert_type="SENSOR_CAMERA_MISMATCH",
+                            slot_id=slot.slot_id,
+                            severity="WARNING",
+                            message=f"Thị giác AI tại {slot.slot_id} phát hiện trạng thái không khớp với cảm biến."
+                        )
+                        db.add(alert)
+                else:
+                    slot.status = "OCCUPIED" if slot.camera_occupied else "EMPTY"
+                    existing_alert = db.query(SystemAlert).filter(
+                        SystemAlert.alert_type == "SENSOR_CAMERA_MISMATCH",
+                        SystemAlert.slot_id == slot.slot_id,
+                        SystemAlert.is_resolved == False
+                    ).first()
+                    if existing_alert:
+                        existing_alert.is_resolved = True
+
+                existing_lost = db.query(SystemAlert).filter(
+                    SystemAlert.alert_type == "CAMERA_SIGNAL_LOST",
+                    SystemAlert.slot_id == slot.slot_id,
+                    SystemAlert.is_resolved == False
+                ).first()
+                if existing_lost:
+                    existing_lost.is_resolved = True
 
             updated.append(slot)
 
@@ -428,6 +497,27 @@ class ParkingService:
         entry_gate = adapter.get_barrier_status("ENTRY")
         exit_gate = adapter.get_barrier_status("EXIT")
 
+        now = datetime.now(timezone.utc)
+        is_sim = (adapter.get_mode() == "SIMULATION")
+
+        esp32_online = False
+        if ParkingService.last_sensor_telemetry_time is not None:
+            last_s = ParkingService.last_sensor_telemetry_time
+            if last_s.tzinfo is None:
+                last_s = last_s.replace(tzinfo=timezone.utc)
+            esp32_online = (now - last_s).total_seconds() < 10.0
+        elif is_sim:
+            esp32_online = True
+
+        camera_online = False
+        if ParkingService.last_vision_telemetry_time is not None:
+            last_v = ParkingService.last_vision_telemetry_time
+            if last_v.tzinfo is None:
+                last_v = last_v.replace(tzinfo=timezone.utc)
+            camera_online = (now - last_v).total_seconds() < 10.0
+        elif is_sim:
+            camera_online = True
+
         return {
             "total_slots": total,
             "available_slots": available,
@@ -442,6 +532,8 @@ class ParkingService:
             "barrier_entry_obstruction": entry_gate.get("obstruction", False),
             "barrier_exit_obstruction": exit_gate.get("obstruction", False),
             "is_simulation_mode": (adapter.get_mode() == "SIMULATION"),
-            "system_mode": adapter.get_mode()
+            "system_mode": adapter.get_mode(),
+            "esp32_online": esp32_online,
+            "camera_online": camera_online
         }
 

@@ -70,18 +70,31 @@ static void rfid_task(void *pvParameters) {
 }
 
 static void barrier_task(void *pvParameters) {
-    ESP_LOGI(TAG, "Barrier safety monitor task started.");
+    ESP_LOGI(TAG, "Barrier safety monitor task started (non-blocking countdown state machine).");
+    uint32_t clear_counter_ms[2] = {0, 0};
+    const uint32_t poll_interval_ms = 100;
+    const uint32_t required_clear_ms = 3000;
+
     while (1) {
-        // Tự động đóng barrier sau khi xe qua và không có vật cản
+        // Tự động đóng barrier sau khi xe qua và liên tục không có vật cản trong 3s
         for (int gate = 0; gate < 2; gate++) {
             if (barrier_get_state(gate) == BARRIER_OPEN) {
-                if (!barrier_is_obstruction_detected(gate)) {
-                    vTaskDelay(pdMS_TO_TICKS(3000)); // Đếm trễ an toàn 3 giây
-                    barrier_close(gate);
+                if (barrier_is_obstruction_detected(gate)) {
+                    // Nếu phát hiện vật cản trong chùm tia an toàn, lập tức xóa bộ đếm đóng
+                    clear_counter_ms[gate] = 0;
+                } else {
+                    // Liên tục an toàn: tăng bộ đếm
+                    clear_counter_ms[gate] += poll_interval_ms;
+                    if (clear_counter_ms[gate] >= required_clear_ms) {
+                        barrier_close(gate);
+                        clear_counter_ms[gate] = 0;
+                    }
                 }
+            } else {
+                clear_counter_ms[gate] = 0;
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
     }
 }
 

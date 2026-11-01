@@ -144,5 +144,7 @@ class SystemStatsResponse(BaseModel):
     barrier_exit_obstruction: bool = False
     is_simulation_mode: bool = True
     system_mode: str = "SIMULATION"
+    esp32_online: bool = True
+    camera_online: bool = True
 
 
