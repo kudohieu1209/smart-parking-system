@@ -29,4 +29,12 @@ menu "Smart Parking ESP32 Configuration"
             are permitted even if Wi-Fi or Backend is disconnected.
             Keep disabled (n) in production / real hardware mode.
 
+    config SMART_PARKING_RFID_DEBUG
+        bool "Enable Detailed MFRC522 RFID Diagnostics Logging"
+        default y
+        help
+            Enables verbose debug logs for MFRC522 SPI transactions:
+            raw UID bytes, FIFO level, valid bits, ErrorReg, ComIrqReg,
+            and calculated vs received BCC.
+
 endmenu

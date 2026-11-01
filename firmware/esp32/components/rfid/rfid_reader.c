@@ -17,6 +17,10 @@
 
 static const char *TAG = "MFRC522_RFID";
 
+#ifndef CONFIG_SMART_PARKING_RFID_DEBUG
+#define CONFIG_SMART_PARKING_RFID_DEBUG 1
+#endif
+
 // ==============================================================================
 // MFRC522 REGISTERS & COMMANDS
 // ==============================================================================
@@ -80,6 +84,54 @@ static uint8_t mfrc522_read_reg(spi_device_handle_t spi, uint8_t reg) {
     return 0;
 }
 
+/**
+ * @brief Ghi chuỗi byte liên tục vào FIFODataReg trong một SPI transaction duy nhất.
+ */
+static esp_err_t mfrc522_write_fifo(spi_device_handle_t spi, const uint8_t *data, size_t len) {
+    if (!spi || !data || len == 0 || len > 64) return ESP_ERR_INVALID_ARG;
+    uint8_t tx_buf[65];
+    tx_buf[0] = (uint8_t)((FIFODataReg << 1) & 0x7E); // MSB = 0 cho lệnh ghi
+    memcpy(&tx_buf[1], data, len);
+
+    spi_transaction_t t = {
+        .length = (len + 1) * 8,
+        .tx_buffer = tx_buf,
+        .rx_buffer = NULL
+    };
+    return spi_device_polling_transmit(spi, &t);
+}
+
+/**
+ * @brief Đọc chuỗi byte liên tục từ FIFODataReg theo đúng chuẩn streaming SPI của MFRC522.
+ * Giữ CS LOW trong toàn bộ quá trình đọc để tránh pop đúp/bỏ sót byte trong FIFO.
+ */
+static esp_err_t mfrc522_read_fifo(spi_device_handle_t spi, uint8_t *data, size_t len) {
+    if (!spi || !data || len == 0 || len > 64) return ESP_ERR_INVALID_ARG;
+    uint8_t tx_buf[65] = {0};
+    uint8_t rx_buf[65] = {0};
+
+    uint8_t addr = (uint8_t)(((FIFODataReg << 1) & 0x7E) | 0x80); // MSB = 1 cho lệnh đọc
+    tx_buf[0] = addr;
+    for (size_t i = 1; i < len; i++) {
+        tx_buf[i] = addr; // Gửi địa chỉ để clock out các byte tiếp theo
+    }
+    tx_buf[len] = 0x00; // Byte cuối cùng gửi 0x00 để kết thúc luồng đọc
+
+    spi_transaction_t t = {
+        .length = (len + 1) * 8,
+        .tx_buffer = tx_buf,
+        .rx_buffer = rx_buf
+    };
+    esp_err_t ret = spi_device_polling_transmit(spi, &t);
+    if (ret != ESP_OK) return ret;
+
+    // rx_buf[0] là phản hồi giả khi gửi địa chỉ, dữ liệu thực nằm từ rx_buf[1] đến rx_buf[len]
+    for (size_t i = 0; i < len; i++) {
+        data[i] = rx_buf[i + 1];
+    }
+    return ESP_OK;
+}
+
 static void mfrc522_set_bit_mask(spi_device_handle_t spi, uint8_t reg, uint8_t mask) {
     uint8_t current = mfrc522_read_reg(spi, reg);
     mfrc522_write_reg(spi, reg, current | mask);
@@ -134,7 +186,7 @@ esp_err_t rfid_reader_init(void) {
     gpio_set_level((gpio_num_t)PIN_RFID_RST, 1);
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    // 2. Khởi tạo bus SPI (VSPI_HOST)
+    // 2. Khởi tạo bus SPI (SPI3_HOST / VSPI)
     spi_bus_config_t buscfg = {
         .miso_io_num = PIN_RFID_SPI_MISO,
         .mosi_io_num = PIN_RFID_SPI_MOSI,
@@ -195,54 +247,79 @@ esp_err_t rfid_reader_get_version(gate_id_t gate, uint8_t *out_version) {
     return (*out_version == 0x00 || *out_version == 0xFF) ? ESP_ERR_INVALID_RESPONSE : ESP_OK;
 }
 
+/**
+ * @brief Giao tiếp cấp thấp với thẻ RFID (PICC) qua lệnh phát/nhận PCD_TRANSCEIVE.
+ * Triển khai chuẩn ISO 14443-3 / MFRC522: hủy lệnh đang chạy, xóa triệt để IRQ, flush FIFO.
+ */
 static esp_err_t mfrc522_to_card(spi_device_handle_t spi, uint8_t cmd,
                                  const uint8_t *send_data, uint8_t send_len,
-                                 uint8_t *back_data, uint32_t *back_len) {
+                                 uint8_t *back_data, uint32_t *back_len,
+                                 uint8_t *valid_bits) {
     uint8_t irq_en = 0x77;
-    uint8_t wait_irq = 0x30;
+    uint8_t wait_irq = 0x30; // Chờ RxIRq (0x20) hoặc IdleIRq (0x10)
 
-    mfrc522_write_reg(spi, ComIEnReg, irq_en | 0x80);
-    mfrc522_clear_bit_mask(spi, ComIrqReg, 0x80);
-    mfrc522_set_bit_mask(spi, FIFOLevelReg, 0x80); // FlushBuffer
-
+    // 1. Dừng bất kỳ lệnh nào đang thực thi trên chip
     mfrc522_write_reg(spi, CommandReg, PCD_IDLE);
 
-    // Ghi dữ liệu vào FIFO
-    for (int i = 0; i < send_len; i++) {
-        mfrc522_write_reg(spi, FIFODataReg, send_data[i]);
+    // 2. Xóa toàn bộ 7 cờ ngắt trong ComIrqReg (Ghi 1 vào các bit khi bit 7 Set1 = 0 sẽ xóa cờ)
+    mfrc522_write_reg(spi, ComIrqReg, 0x7F);
+
+    // 3. Khởi tạo/Flush FIFO buffer
+    mfrc522_set_bit_mask(spi, FIFOLevelReg, 0x80);
+
+    // 4. Bật ngắt giao tiếp
+    mfrc522_write_reg(spi, ComIEnReg, irq_en | 0x80);
+
+    // 5. Nạp dữ liệu phát vào FIFO theo chuẩn multi-byte
+    if (send_data && send_len > 0) {
+        mfrc522_write_fifo(spi, send_data, send_len);
     }
 
-    // Thực thi lệnh phát / nhận
+    // 6. Thực thi lệnh phát / nhận
     mfrc522_write_reg(spi, CommandReg, cmd);
     if (cmd == PCD_TRANSCEIVE) {
-        mfrc522_set_bit_mask(spi, BitFramingReg, 0x80); // StartSend
+        mfrc522_set_bit_mask(spi, BitFramingReg, 0x80); // StartSend = 1
     }
 
-    // Chờ nhận dữ liệu hoặc timeout (25ms)
+    // 7. Chờ nhận dữ liệu hoặc timeout (25ms)
     int timeout = 250;
-    uint8_t n = 0;
+    uint8_t irq_val = 0;
     do {
         esp_rom_delay_us(100);
-        n = mfrc522_read_reg(spi, ComIrqReg);
+        irq_val = mfrc522_read_reg(spi, ComIrqReg);
         timeout--;
-    } while ((timeout > 0) && !(n & 0x01) && !(n & wait_irq));
+    } while ((timeout > 0) && !(irq_val & 0x01) && !(irq_val & wait_irq));
 
+    // 8. Tắt cờ StartSend
     mfrc522_clear_bit_mask(spi, BitFramingReg, 0x80);
 
-    if (timeout <= 0 || (n & 0x01)) {
+    // 9. Kiểm tra lỗi timeout hoặc timer IRQ
+    if (timeout <= 0 || (irq_val & 0x01)) {
         return ESP_ERR_TIMEOUT;
     }
 
-    uint8_t error = mfrc522_read_reg(spi, ErrorReg);
-    if (error & 0x1B) {
+    // 10. Kiểm tra thanh ghi lỗi ErrorReg
+    uint8_t error_val = mfrc522_read_reg(spi, ErrorReg);
+    if (error_val & 0x1B) { // BufferOvfl (0x10), ParityErr (0x02), ProtocolErr (0x01), CollErr (0x08)
         return ESP_ERR_INVALID_RESPONSE;
     }
 
+    // 11. Đọc dữ liệu phản hồi từ FIFO
     if (back_data && back_len) {
-        uint8_t fifo_len = mfrc522_read_reg(spi, FIFOLevelReg);
-        if (fifo_len > *back_len) fifo_len = *back_len;
-        for (int i = 0; i < fifo_len; i++) {
-            back_data[i] = mfrc522_read_reg(spi, FIFODataReg);
+        uint8_t fifo_len = mfrc522_read_reg(spi, FIFOLevelReg) & 0x7F;
+        uint8_t rx_last_bits = mfrc522_read_reg(spi, ControlReg) & 0x07;
+
+        if (valid_bits) {
+            *valid_bits = rx_last_bits;
+        }
+
+        if (fifo_len > *back_len) {
+            fifo_len = (uint8_t)(*back_len);
+        }
+
+        if (fifo_len > 0) {
+            esp_err_t r_err = mfrc522_read_fifo(spi, back_data, fifo_len);
+            if (r_err != ESP_OK) return r_err;
         }
         *back_len = fifo_len;
     }
@@ -269,29 +346,55 @@ esp_err_t rfid_reader_poll(gate_id_t gate, char *out_card_uid, size_t max_len) {
     uint8_t tag_type[2] = {0};
     uint32_t back_len = sizeof(tag_type);
     uint8_t req_cmd = PICC_REQIDL;
-    esp_err_t ret = mfrc522_to_card(spi, PCD_TRANSCEIVE, &req_cmd, 1, tag_type, &back_len);
+    uint8_t valid_bits = 0;
+    esp_err_t ret = mfrc522_to_card(spi, PCD_TRANSCEIVE, &req_cmd, 1, tag_type, &back_len, &valid_bits);
     if (ret != ESP_OK || back_len == 0) {
         return ESP_ERR_NOT_FOUND; // Không có thẻ trong vùng quét
     }
 
-    // 3. Chống xung đột & đọc 4-byte UID (PICC_ANTICOLL)
-    mfrc522_write_reg(spi, BitFramingReg, 0x00);
+    // Inter-frame Delay: Đảm bảo thẻ ổn định sang READY state sau ATQA (theo chuẩn ISO 14443-3)
+    esp_rom_delay_us(1000);
+
+    // 3. Chống xung đột & đọc 4-byte UID (PICC_ANTICOLL, Cascade Level 1)
+    mfrc522_write_reg(spi, BitFramingReg, 0x00); // 8-bit frames, RxAlign = 0
     uint8_t anticoll_cmd[2] = { PICC_ANTICOLL, 0x20 };
     uint8_t uid_buf[5] = {0};
     back_len = sizeof(uid_buf);
-    ret = mfrc522_to_card(spi, PCD_TRANSCEIVE, anticoll_cmd, 2, uid_buf, &back_len);
-    if (ret != ESP_OK || back_len < 4) {
+    valid_bits = 0;
+
+    ret = mfrc522_to_card(spi, PCD_TRANSCEIVE, anticoll_cmd, 2, uid_buf, &back_len, &valid_bits);
+    if (ret != ESP_OK) {
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    // 4. Kiểm tra checksum BCC (XOR 4 byte đầu phải bằng byte thứ 5)
-    uint8_t bcc_check = uid_buf[0] ^ uid_buf[1] ^ uid_buf[2] ^ uid_buf[3];
-    if (back_len >= 5 && bcc_check != uid_buf[4]) {
-        ESP_LOGW(TAG, "MFRC522 Checksum mismatch: calculated 0x%02X, received 0x%02X", bcc_check, uid_buf[4]);
+    uint8_t bcc_calc = uid_buf[0] ^ uid_buf[1] ^ uid_buf[2] ^ uid_buf[3];
+    uint8_t bcc_recv = uid_buf[4];
+    uint8_t err_reg = mfrc522_read_reg(spi, ErrorReg);
+    uint8_t irq_reg = mfrc522_read_reg(spi, ComIrqReg);
+
+#if CONFIG_SMART_PARKING_RFID_DEBUG
+    ESP_LOGI(TAG, "[%s RFID] Raw UID: %02X %02X %02X %02X %02X | FIFO_len=%lu, RxLastBits=%d, ErrorReg=0x%02X, ComIrq=0x%02X | BCC calc=0x%02X, recv=0x%02X",
+             (gate == GATE_ENTRY) ? "ENTRY" : "EXIT",
+             uid_buf[0], uid_buf[1], uid_buf[2], uid_buf[3], uid_buf[4],
+             (unsigned long)back_len, (int)valid_bits, err_reg, irq_reg,
+             bcc_calc, bcc_recv);
+#endif
+
+    // 4. Với thẻ 4-byte UID, phản hồi bắt buộc phải đủ 5 bytes và valid_bits = 0
+    if (back_len != 5 || valid_bits != 0) {
+        ESP_LOGW(TAG, "[%s RFID] Invalid response framing: len=%lu, validBits=%d",
+                 (gate == GATE_ENTRY) ? "ENTRY" : "EXIT", (unsigned long)back_len, (int)valid_bits);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    // 5. Kiểm tra checksum BCC (XOR 4 byte đầu phải bằng byte thứ 5)
+    if (bcc_calc != bcc_recv) {
+        ESP_LOGW(TAG, "[%s RFID] MFRC522 Checksum mismatch: calculated 0x%02X, received 0x%02X",
+                 (gate == GATE_ENTRY) ? "ENTRY" : "EXIT", bcc_calc, bcc_recv);
         return ESP_ERR_INVALID_CRC;
     }
 
-    // 5. Định dạng mã UID chuẩn cho hệ thống
+    // 6. Định dạng mã UID chuẩn cho hệ thống (VD: "30:A1:23:45")
     snprintf(out_card_uid, max_len, "%02X:%02X:%02X:%02X",
              uid_buf[0], uid_buf[1], uid_buf[2], uid_buf[3]);
 
