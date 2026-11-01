@@ -23,8 +23,8 @@ jobs:
 
       - name: Build Firmware with Espressif ESP-IDF v5.3 Container
         run: |
-          echo "Launching Espressif ESP-IDF v5.3 build environment..."
-          docker run --rm \
+          echo "Launching Espressif ESP-IDF v5.3 build environment as root user..."
+          docker run --rm --user root \
             -v "${{ github.workspace }}":/workspace \
             -w /workspace/firmware/esp32 \
             -e "GIT_CONFIG_COUNT=1" \
@@ -32,6 +32,14 @@ jobs:
             -e "GIT_CONFIG_VALUE_0=*" \
             espressif/idf:v5.3 \
             bash -c "set -o pipefail && idf.py build 2>&1 | tee /workspace/firmware/esp32/build_compiler.log"
+
+      - name: Show Compiler Log Tail on Failure
+        if: failure()
+        run: |
+          if [ -f firmware/esp32/build_compiler.log ]; then
+            echo "=== RECENT COMPILER / LINKER LOG ==="
+            tail -n 120 firmware/esp32/build_compiler.log
+          fi
 
       - name: Verify and list build artifacts
         run: |
@@ -46,7 +54,6 @@ jobs:
           test -f firmware/esp32/build/flasher_args.json && echo "[OK] flasher_args.json exists"
           test -f firmware/esp32/build/bootloader/bootloader.bin && echo "[OK] bootloader.bin exists"
           test -f firmware/esp32/build/partition_table/partition-table.bin && echo "[OK] partition-table.bin exists"
-          test -f firmware/esp32/build_compiler.log && echo "[OK] build_compiler.log exists"
           echo "=========================================="
           cat firmware/esp32/build/flasher_args.json
           echo "=========================================="
