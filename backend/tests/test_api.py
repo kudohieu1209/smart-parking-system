@@ -143,3 +143,88 @@ def test_system_mode_toggle(client):
     assert set_sim.status_code == 200
     assert set_sim.json()["mode"] == "SIMULATION"
 
+def test_phase3_5_hardware_mode_telemetry_and_decoupling(client):
+    """
+    Kiểm thử Tích hợp Phase 3.5:
+    1. Chuyển sang HARDWARE mode.
+    2. Tách biệt Authorization (ALLOWED/OPEN_BARRIER) khỏi Actuator State (chỉ OPEN khi ESP32 gửi telemetry).
+    3. Kiểm thử telemetry /gate/barrier-state và /gate/safety-sensor từ ESP32.
+    4. Kiểm tra khóa an toàn liên động (Safety Interlock).
+    """
+    try:
+        # 1. Kích hoạt Hardware Mode
+        set_hw = client.post("/api/v1/system/mode?mode=HARDWARE")
+        assert set_hw.status_code == 200
+        assert set_hw.json()["mode"] == "HARDWARE"
+
+        stats0 = client.get("/api/v1/system/stats").json()
+        assert stats0["barrier_entry_state"] == "CLOSED"
+        assert stats0["barrier_entry_angle"] == 0
+        assert stats0["system_mode"] == "HARDWARE"
+
+        # 2. Quẹt thẻ vào cổng -> Backend cho phép nhưng phần cứng chưa báo mở
+        tap_resp = client.post("/api/v1/gate/entry-tap", json={"card_uid": "30:A1:23:45", "gate_id": "ENTRY"})
+        assert tap_resp.status_code == 200
+        tap_data = tap_resp.json()
+        assert tap_data["status"] == "ALLOWED"
+        assert tap_data["action"] == "OPEN_BARRIER"
+
+        # Kiểm tra: Trong Hardware Mode, trạng thái barrier KHÔNG tự động chuyển OPEN trước khi ESP32 báo
+        stats1 = client.get("/api/v1/system/stats").json()
+        assert stats1["barrier_entry_state"] == "CLOSED"
+
+        # 3. ESP32 thực sự quay servo lên 90 độ và gửi telemetry xác nhận
+        esp_barrier_open = client.post("/api/v1/gate/barrier-state", json={
+            "gate_id": "ENTRY",
+            "state": "OPEN",
+            "angle": 90
+        })
+        assert esp_barrier_open.status_code == 200
+        assert esp_barrier_open.json()["state"] == "OPEN"
+        assert esp_barrier_open.json()["angle"] == 90
+
+        # Dashboard / Stats giờ đây đã phản ánh đúng góc mở 90 độ
+        stats2 = client.get("/api/v1/system/stats").json()
+        assert stats2["barrier_entry_state"] == "OPEN"
+        assert stats2["barrier_entry_angle"] == 90
+
+        # 4. ESP32 phát hiện vật cản qua chùm tia an toàn và gửi telemetry
+        esp_safety_block = client.post("/api/v1/gate/safety-sensor", json={
+            "gate_id": "ENTRY",
+            "has_obstruction": True
+        })
+        assert esp_safety_block.status_code == 200
+        assert esp_safety_block.json()["has_obstruction"] is True
+
+        stats3 = client.get("/api/v1/system/stats").json()
+        assert stats3["barrier_entry_obstruction"] is True
+
+        # Khi có vật cản, lệnh đóng barrier từ Dashboard/API phải bị từ chối an toàn
+        close_fail = client.post("/api/v1/gate/command", json={"gate_id": "ENTRY", "command": "CLOSE"})
+        assert close_fail.status_code == 400
+        assert "SAFETY" in close_fail.json()["detail"]
+
+        # 5. Vật cản đã thông thoáng
+        esp_safety_clear = client.post("/api/v1/gate/safety-sensor", json={
+            "gate_id": "ENTRY",
+            "has_obstruction": False
+        })
+        assert esp_safety_clear.status_code == 200
+
+        # 6. ESP32 sau 3s an toàn hạ servo về 0 độ và gửi telemetry đóng
+        esp_barrier_close = client.post("/api/v1/gate/barrier-state", json={
+            "gate_id": "ENTRY",
+            "state": "CLOSED",
+            "angle": 0
+        })
+        assert esp_barrier_close.status_code == 200
+
+        stats4 = client.get("/api/v1/system/stats").json()
+        assert stats4["barrier_entry_state"] == "CLOSED"
+        assert stats4["barrier_entry_angle"] == 0
+        assert stats4["barrier_entry_obstruction"] is False
+
+    finally:
+        # Luôn trả về chế độ SIMULATION sau kiểm thử
+        client.post("/api/v1/system/mode?mode=SIMULATION")
+

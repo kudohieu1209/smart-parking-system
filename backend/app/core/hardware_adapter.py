@@ -25,6 +25,11 @@ class IHardwareAdapter(ABC):
         pass
 
     @abstractmethod
+    def set_barrier_state(self, gate_id: str, state: str, angle: Any = None) -> bool:
+        """Cập nhật trạng thái cánh tay barie từ telemetry thiết bị hoặc logic điều khiển."""
+        pass
+
+    @abstractmethod
     def set_safety_sensor(self, gate_id: str, has_obstruction: bool) -> bool:
         """Cập nhật tín hiệu cảm biến quang an toàn tại cổng."""
         pass
@@ -60,6 +65,18 @@ class SimulationHardwareAdapter(IHardwareAdapter):
     def get_barrier_status(self, gate_id: str) -> Dict[str, Any]:
         g = gate_id.upper()
         return self._gates.get(g, {"state": "CLOSED", "angle": 0, "obstruction": False})
+
+    def set_barrier_state(self, gate_id: str, state: str, angle: Any = None) -> bool:
+        g = gate_id.upper()
+        if g in self._gates:
+            st = state.upper()
+            self._gates[g]["state"] = st
+            if angle is not None:
+                self._gates[g]["angle"] = int(angle)
+            else:
+                self._gates[g]["angle"] = 90 if st == "OPEN" else 0
+            return True
+        return False
 
     def set_safety_sensor(self, gate_id: str, has_obstruction: bool) -> bool:
         g = gate_id.upper()
@@ -99,27 +116,63 @@ class SimulationHardwareAdapter(IHardwareAdapter):
 class PhysicalHardwareAdapter(IHardwareAdapter):
     """
     Bộ chuyển đổi kết nối với vi điều khiển ESP32 thật qua giao thức MQTT / REST.
-    Sẵn sàng kích hoạt khi chuyển sang phần cứng vật lý.
+    Duy trì trạng thái thực tế nhận được từ telemetry của ESP32 (POST /gate/barrier-state và /gate/safety-sensor).
+    Tách biệt quyết định cho phép truy cập với trạng thái vật lý thực tế của cơ cấu chấp hành.
     """
     def __init__(self, broker_url: str = "mqtt://localhost:1883"):
         self.broker_url = broker_url
+        self._gates = {
+            "ENTRY": {
+                "state": "CLOSED",
+                "angle": 0,
+                "obstruction": False
+            },
+            "EXIT": {
+                "state": "CLOSED",
+                "angle": 0,
+                "obstruction": False
+            }
+        }
         logger.info(f"[HAL] Initialized PhysicalHardwareAdapter (HARDWARE MODE, Broker: {broker_url})")
 
     def get_mode(self) -> str:
         return "HARDWARE"
 
     def get_barrier_status(self, gate_id: str) -> Dict[str, Any]:
-        # Truy vấn telemetry vật lý từ ESP32
-        return {"state": "CLOSED", "angle": 0, "obstruction": False}
+        g = gate_id.upper()
+        return self._gates.get(g, {"state": "CLOSED", "angle": 0, "obstruction": False})
+
+    def set_barrier_state(self, gate_id: str, state: str, angle: Any = None) -> bool:
+        g = gate_id.upper()
+        if g in self._gates:
+            st = state.upper()
+            self._gates[g]["state"] = st
+            if angle is not None:
+                self._gates[g]["angle"] = int(angle)
+            else:
+                self._gates[g]["angle"] = 90 if st == "OPEN" else 0
+            logger.info(f"[PHYSICAL HAL] Gate {g} reported barrier state: state={st}, angle={self._gates[g]['angle']}")
+            return True
+        return False
 
     def set_safety_sensor(self, gate_id: str, has_obstruction: bool) -> bool:
-        logger.info(f"[PHYSICAL HAL] Hardware safety interrupt reported from ESP32 for {gate_id}")
-        return True
+        g = gate_id.upper()
+        if g in self._gates:
+            self._gates[g]["obstruction"] = bool(has_obstruction)
+            logger.info(f"[PHYSICAL HAL] Gate {g} reported safety sensor: obstruction={has_obstruction}")
+            return True
+        return False
 
     def command_barrier(self, gate_id: str, action: str) -> tuple[bool, str]:
-        logger.info(f"[PHYSICAL HAL] Dispatching PWM command '{action}' to ESP32 via MQTT/HTTP")
-        # Gửi payload MQTT tới topic `parking/barrier/{gate_id}/cmd`
-        return True, f"Hardware command {action} dispatched to ESP32"
+        g = gate_id.upper()
+        act = action.upper()
+        if g not in self._gates:
+            return False, f"Unknown gate ID: {gate_id}"
+        if act == "CLOSE" and self._gates[g]["obstruction"]:
+            logger.warning(f"[PHYSICAL HAL] Gate {g}: Close command rejected! Obstruction detected.")
+            return False, "SAFETY REJECTION: Obstruction detected in barrier clearance zone!"
+        logger.info(f"[PHYSICAL HAL] Dispatching command '{act}' to ESP32 for gate {g}")
+        return True, f"Hardware command {act} dispatched to ESP32"
 
 # Global Adapter Instance
 _current_adapter = SimulationHardwareAdapter()

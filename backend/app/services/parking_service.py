@@ -176,12 +176,14 @@ class ParkingService:
             adapter.command_barrier("ENTRY", "OPEN")
 
             session_dto = ParkingSessionResponse.model_validate(new_session)
+            gate_state = adapter.get_barrier_status("ENTRY")["state"]
             await ws_manager.broadcast({
                 "event_type": "SESSION_CREATED",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": {
                     "session": session_dto.model_dump(),
-                    "barrier_state": "OPEN",
+                    "barrier_state": gate_state,
+                    "action": "OPEN_BARRIER",
                     "gate_id": "ENTRY"
                 }
             })
@@ -249,6 +251,7 @@ class ParkingService:
         adapter.command_barrier("EXIT", "OPEN")
 
         session_dto = ParkingSessionResponse.model_validate(active_session)
+        gate_state = adapter.get_barrier_status("EXIT")["state"]
         await ws_manager.broadcast({
             "event_type": "SESSION_COMPLETED",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -256,7 +259,8 @@ class ParkingService:
                 "session": session_dto.model_dump(),
                 "fee": fee,
                 "duration_minutes": duration_minutes,
-                "barrier_state": "OPEN",
+                "barrier_state": gate_state,
+                "action": "OPEN_BARRIER",
                 "gate_id": "EXIT"
             }
         })
@@ -427,9 +431,9 @@ class ParkingService:
         })
 
     @staticmethod
-    async def set_barrier_state(gate_id: str, state: str):
+    async def set_barrier_state(gate_id: str, state: str, angle: Optional[int] = None):
         adapter = get_hardware_adapter()
-        adapter.command_barrier(gate_id, state)
+        adapter.set_barrier_state(gate_id, state, angle)
         gate_info = adapter.get_barrier_status(gate_id)
         await ws_manager.broadcast({
             "event_type": "BARRIER_UPDATE",

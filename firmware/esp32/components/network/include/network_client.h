@@ -46,6 +46,23 @@ esp_err_t network_send_telemetry(const slot_telemetry_t slots[MAX_SLOTS]);
  */
 esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_allowed, char *out_msg, size_t msg_len);
 
+/**
+ * @brief Gửi thông báo trạng thái cánh tay barie lên Backend (/api/v1/gate/barrier-state).
+ * 
+ * @param gate Cổng (GATE_ENTRY hoặc GATE_EXIT)
+ * @param state Trạng thái barrier (BARRIER_OPEN hoặc BARRIER_CLOSED)
+ * @param angle Góc mở servo (0..90 độ)
+ */
+esp_err_t network_send_barrier_state(gate_id_t gate, barrier_state_t state, int angle);
+
+/**
+ * @brief Gửi thông báo trạng thái cảm biến quang an toàn lên Backend (/api/v1/gate/safety-sensor).
+ * 
+ * @param gate Cổng (GATE_ENTRY hoặc GATE_EXIT)
+ * @param has_obstruction true nếu có vật cản, false nếu thông thoáng
+ */
+esp_err_t network_send_safety_sensor(gate_id_t gate, bool has_obstruction);
+
 #ifdef __cplusplus
 }
 #endif

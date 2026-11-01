@@ -292,3 +292,92 @@ esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_
     cJSON_Delete(resp_json);
     return ESP_OK;
 }
+
+esp_err_t network_send_barrier_state(gate_id_t gate, barrier_state_t state, int angle) {
+    if (!g_wifi_connected) {
+        ESP_LOGD(TAG, "Wi-Fi offline, skipping barrier state HTTP notification");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const char *gate_str = (gate == GATE_ENTRY) ? "ENTRY" : "EXIT";
+    const char *state_str = (state == BARRIER_OPEN) ? "OPEN" : "CLOSED";
+
+    ESP_LOGI(TAG, "Notifying Backend of Barrier State: Gate=%s, State=%s, Angle=%d",
+             gate_str, state_str, angle);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "gate_id", gate_str);
+    cJSON_AddStringToObject(root, "state", state_str);
+    cJSON_AddNumberToObject(root, "angle", angle);
+
+    char *post_data = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!post_data) return ESP_ERR_NO_MEM;
+
+    char url[256];
+    snprintf(url, sizeof(url), "%s/gate/barrier-state", s_backend_url);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 3000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, post_data, strlen(post_data));
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        int status_code = esp_http_client_get_status_code(client);
+        ESP_LOGD(TAG, "Barrier state notified successfully, status = %d", status_code);
+    } else {
+        ESP_LOGW(TAG, "Barrier state HTTP POST failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+    free(post_data);
+    return err;
+}
+
+esp_err_t network_send_safety_sensor(gate_id_t gate, bool has_obstruction) {
+    if (!g_wifi_connected) {
+        ESP_LOGD(TAG, "Wi-Fi offline, skipping safety sensor HTTP notification");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const char *gate_str = (gate == GATE_ENTRY) ? "ENTRY" : "EXIT";
+    ESP_LOGI(TAG, "Notifying Backend of Safety Sensor: Gate=%s, Obstruction=%s",
+             gate_str, has_obstruction ? "YES" : "NO");
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "gate_id", gate_str);
+    cJSON_AddBoolToObject(root, "has_obstruction", has_obstruction);
+
+    char *post_data = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!post_data) return ESP_ERR_NO_MEM;
+
+    char url[256];
+    snprintf(url, sizeof(url), "%s/gate/safety-sensor", s_backend_url);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 3000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, post_data, strlen(post_data));
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        int status_code = esp_http_client_get_status_code(client);
+        ESP_LOGD(TAG, "Safety sensor notified successfully, status = %d", status_code);
+    } else {
+        ESP_LOGW(TAG, "Safety sensor HTTP POST failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+    free(post_data);
+    return err;
+}

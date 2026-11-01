@@ -85,8 +85,8 @@ async def gate_exit_tap(payload: CardTapRequest, db: Session = Depends(get_db)):
 
 @api_router.post("/gate/barrier-state")
 async def update_barrier_state(payload: BarrierStateRequest):
-    await ParkingService.set_barrier_state(payload.gate_id, payload.state)
-    return {"status": "SUCCESS", "gate_id": payload.gate_id, "state": payload.state}
+    await ParkingService.set_barrier_state(payload.gate_id, payload.state, payload.angle)
+    return {"status": "SUCCESS", "gate_id": payload.gate_id, "state": payload.state, "angle": payload.angle}
 
 @api_router.post("/gate/safety-sensor")
 async def update_safety_sensor(payload: BarrierSafetySensorRequest, db: Session = Depends(get_db)):

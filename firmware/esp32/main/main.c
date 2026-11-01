@@ -81,6 +81,7 @@ static void rfid_task(void *pvParameters) {
                 ESP_LOGI(TAG, "Entry Granted! Raising barrier.");
                 display_lcd_show_status(4, "WELCOME! OPEN");
                 barrier_open(GATE_ENTRY);
+                network_send_barrier_state(GATE_ENTRY, BARRIER_OPEN, 90);
             } else {
                 ESP_LOGW(TAG, "Entry Denied: %s", msg);
                 display_lcd_show_status(4, "ACCESS DENIED");
@@ -103,6 +104,7 @@ static void rfid_task(void *pvParameters) {
                 ESP_LOGI(TAG, "Exit Granted! Raising barrier.");
                 display_lcd_show_status(4, "GOODBYE! OPEN");
                 barrier_open(GATE_EXIT);
+                network_send_barrier_state(GATE_EXIT, BARRIER_OPEN, 90);
             } else {
                 ESP_LOGW(TAG, "Exit Denied: %s", msg);
                 display_lcd_show_status(4, "ACCESS DENIED");
@@ -124,11 +126,18 @@ static void barrier_task(void *pvParameters) {
     const uint32_t poll_interval_ms = 100;
     const uint32_t required_clear_ms = 3000;
     bool obstruction_logged[2] = {false, false};
+    bool last_obstruction[2] = {false, false};
 
     while (1) {
         for (int gate = 0; gate < 2; gate++) {
+            bool current_obs = barrier_is_obstruction_detected((gate_id_t)gate);
+            if (current_obs != last_obstruction[gate]) {
+                last_obstruction[gate] = current_obs;
+                network_send_safety_sensor((gate_id_t)gate, current_obs);
+            }
+
             if (barrier_get_state((gate_id_t)gate) == BARRIER_OPEN) {
-                if (barrier_is_obstruction_detected((gate_id_t)gate)) {
+                if (current_obs) {
                     // CÓ VẬT CẢN: Lập tức xóa bộ đếm đóng, bảo đảm không hạ barrier
                     clear_counter_ms[gate] = 0;
                     if (!obstruction_logged[gate]) {
@@ -147,6 +156,7 @@ static void barrier_task(void *pvParameters) {
                     if (clear_counter_ms[gate] >= required_clear_ms) {
                         barrier_close((gate_id_t)gate);
                         clear_counter_ms[gate] = 0;
+                        network_send_barrier_state((gate_id_t)gate, BARRIER_CLOSED, 0);
                     }
                 }
             } else {
@@ -260,7 +270,7 @@ void app_main(void) {
     xTaskCreatePinnedToCore(rfid_task, "rfid_task", 4096, NULL, 6, NULL, 1);
 
     // Core 0: Dành riêng cho Networking, Barrier Logic & LCD Display
-    xTaskCreatePinnedToCore(barrier_task, "barrier_task", 3072, NULL, 4, NULL, 0);
+    xTaskCreatePinnedToCore(barrier_task, "barrier_task", 4096, NULL, 4, NULL, 0);
     xTaskCreatePinnedToCore(network_task, "network_task", 4096, NULL, 3, NULL, 0);
     xTaskCreatePinnedToCore(display_task, "display_task", 3072, NULL, 2, NULL, 0);
 
