@@ -7,7 +7,10 @@
 - **Python:** Python 3.14.5 / 3.12 (CI)
 - **Node.js / Vite:** Node.js v20.x, Vite v6.4.5, React 18, TypeScript 5.2
 - **ESP-IDF:** v5.3 (Espressif Docker Container qua GitHub Actions)
-- **Git Commit:** Target `feat: integrate wokwi esp32 with fastapi realtime backend`
+- **Git Commit:** `aab4098` (`feat: integrate wokwi esp32 with fastapi realtime backend`)
+- **GitHub Actions CI Run:** [#41314975182](https://github.com/kudohieu1209/smart-parking-system/actions/runs/41314975182) (SUCCESS)
+  - `esp32-firmware-binaries` (5.3 MB)
+  - `esp32-wokwi-demo-only` (4.7 MB)
 
 ---
 
