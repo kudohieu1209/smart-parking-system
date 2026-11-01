@@ -27,6 +27,7 @@ jobs:
           esp_idf_version: v5.3
           target: esp32
           path: 'firmware/esp32'
+          command: 'idf.py set-target esp32 && idf.py build'
 
       - name: Verify and list build artifacts
         run: |
@@ -73,8 +74,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
-          pip install -r vision/requirements.txt
-          pip install pytest httpx
+          pip install opencv-python numpy pytest httpx anyio
 
       - name: Run Pytest Test Suite
         run: |
