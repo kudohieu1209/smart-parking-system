@@ -21,12 +21,17 @@ jobs:
         with:
           submodules: 'recursive'
 
-      - name: Build ESP-IDF Project
-        uses: espressif/esp-idf-ci-action@v1
-        with:
-          esp_idf_version: v5.3
-          target: esp32
-          path: 'firmware/esp32'
+      - name: Build Firmware with Espressif ESP-IDF v5.3 Container
+        run: |
+          echo "Launching Espressif ESP-IDF v5.3 build environment..."
+          docker run --rm \
+            -v "${{ github.workspace }}":/workspace \
+            -w /workspace/firmware/esp32 \
+            -e "GIT_CONFIG_COUNT=1" \
+            -e "GIT_CONFIG_KEY_0=safe.directory" \
+            -e "GIT_CONFIG_VALUE_0=*" \
+            espressif/idf:v5.3 \
+            bash -c "set -o pipefail && idf.py build 2>&1 | tee /workspace/firmware/esp32/build_compiler.log"
 
       - name: Verify and list build artifacts
         run: |
@@ -37,9 +42,11 @@ jobs:
           echo "Checking binary files..."
           test -f firmware/esp32/build/smart_parking_esp32.bin && echo "[OK] smart_parking_esp32.bin exists"
           test -f firmware/esp32/build/smart_parking_esp32.elf && echo "[OK] smart_parking_esp32.elf exists"
+          test -f firmware/esp32/build/smart_parking_esp32.map && echo "[OK] smart_parking_esp32.map exists"
           test -f firmware/esp32/build/flasher_args.json && echo "[OK] flasher_args.json exists"
           test -f firmware/esp32/build/bootloader/bootloader.bin && echo "[OK] bootloader.bin exists"
           test -f firmware/esp32/build/partition_table/partition-table.bin && echo "[OK] partition-table.bin exists"
+          test -f firmware/esp32/build_compiler.log && echo "[OK] build_compiler.log exists"
           echo "=========================================="
           cat firmware/esp32/build/flasher_args.json
           echo "=========================================="
@@ -55,6 +62,7 @@ jobs:
             firmware/esp32/build/flasher_args.json
             firmware/esp32/build/bootloader/bootloader.bin
             firmware/esp32/build/partition_table/partition-table.bin
+            firmware/esp32/build_compiler.log
           if-no-files-found: error
 
   regression-tests:
