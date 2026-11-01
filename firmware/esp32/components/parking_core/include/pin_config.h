@@ -86,7 +86,7 @@ extern "C" {
 #ifdef CONFIG_SMART_PARKING_BACKEND_URL
 #define BACKEND_BASE_URL_DEFAULT   CONFIG_SMART_PARKING_BACKEND_URL
 #else
-#define BACKEND_BASE_URL_DEFAULT   "http://10.0.2.2:8000/api/v1" // Host gateway trong mạng ảo Wokwi (10.0.2.2 trỏ về localhost máy tính)
+#define BACKEND_BASE_URL_DEFAULT   "http://host.wokwi.internal:8000/api/v1" // Chuẩn hostname chính thức theo tài liệu Wokwi kết nối về localhost
 #endif
 
 #ifdef __cplusplus
