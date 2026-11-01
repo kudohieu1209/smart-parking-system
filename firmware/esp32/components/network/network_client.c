@@ -195,7 +195,6 @@ esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, post_data, strlen(post_data));
 
     int status_code = 0;
     int read_len = 0;

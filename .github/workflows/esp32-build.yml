@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-esp32-firmware:
@@ -20,6 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Firmware with Espressif ESP-IDF v5.3 Container
         run: |
@@ -33,17 +34,25 @@ jobs:
             espressif/idf:v5.3 \
             bash -c "set -o pipefail && idf.py build 2>&1 | tee /workspace/firmware/esp32/build_compiler.log"
 
-      - name: Render Compiler Log to GitHub Step Summary
-        if: always()
+      - name: Push Build Log to CI Branch on Failure
+        if: failure()
         run: |
-          echo "## ESP32 Firmware Build Output Log" >> $GITHUB_STEP_SUMMARY
           if [ -f firmware/esp32/build_compiler.log ]; then
-            echo '```text' >> $GITHUB_STEP_SUMMARY
-            tail -n 200 firmware/esp32/build_compiler.log >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          else
-            echo "No build_compiler.log generated." >> $GITHUB_STEP_SUMMARY
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git checkout -B ci-build-log
+            git add -f firmware/esp32/build_compiler.log
+            git commit -m "chore: save ci build log" || true
+            git push -f origin ci-build-log || true
           fi
+
+      - name: Upload Build Log on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-build-compiler-log
+          path: firmware/esp32/build_compiler.log
+          if-no-files-found: ignore
 
       - name: Verify and list build artifacts
         run: |
@@ -63,7 +72,6 @@ jobs:
           echo "=========================================="
 
       - name: Upload Firmware Artifacts
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: esp32-firmware-binaries
