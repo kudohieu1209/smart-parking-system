@@ -27,7 +27,6 @@ jobs:
           esp_idf_version: v5.3
           target: esp32
           path: 'firmware/esp32'
-          command: 'idf.py set-target esp32 && idf.py build'
 
       - name: Verify and list build artifacts
         run: |
@@ -52,6 +51,7 @@ jobs:
           path: |
             firmware/esp32/build/smart_parking_esp32.bin
             firmware/esp32/build/smart_parking_esp32.elf
+            firmware/esp32/build/smart_parking_esp32.map
             firmware/esp32/build/flasher_args.json
             firmware/esp32/build/bootloader/bootloader.bin
             firmware/esp32/build/partition_table/partition-table.bin
