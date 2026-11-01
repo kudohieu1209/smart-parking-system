@@ -31,35 +31,46 @@ jobs:
             -e "GIT_CONFIG_KEY_0=safe.directory" \
             -e "GIT_CONFIG_VALUE_0=*" \
             espressif/idf:v5.3 \
-            bash -c "set -o pipefail && idf.py build 2>&1 | tee /workspace/firmware/esp32/build_compiler.log && esptool.py --chip esp32 merge_bin -o /workspace/firmware/esp32/build/smart_parking_esp32_merged.bin --flash_mode dio --flash_freq 40m --flash_size 4MB 0x1000 /workspace/firmware/esp32/build/bootloader/bootloader.bin 0x8000 /workspace/firmware/esp32/build/partition_table/partition-table.bin 0x10000 /workspace/firmware/esp32/build/smart_parking_esp32.bin"
+            bash -c "set -eo pipefail && \
+              echo '=== 1/2: Building Production Firmware (Hardware Mode - Fail-Safe Strict) ===' && \
+              idf.py build 2>&1 | tee /workspace/firmware/esp32/build_compiler_prod.log && \
+              esptool.py --chip esp32 merge_bin -o /workspace/firmware/esp32/build/smart_parking_esp32_merged.bin --flash_mode dio --flash_freq 40m --flash_size 4MB 0x1000 /workspace/firmware/esp32/build/bootloader/bootloader.bin 0x8000 /workspace/firmware/esp32/build/partition_table/partition-table.bin 0x10000 /workspace/firmware/esp32/build/smart_parking_esp32.bin && \
+              echo '=== 2/2: Building Wokwi Standalone Demo Firmware (WOKWI_DEMO_ONLY) ===' && \
+              idf.py -B build_demo -DSDKCONFIG_DEFAULTS=\"sdkconfig.defaults;sdkconfig.demo\" -DSDKCONFIG=build_demo/sdkconfig build 2>&1 | tee /workspace/firmware/esp32/build_compiler_demo.log && \
+              esptool.py --chip esp32 merge_bin -o /workspace/firmware/esp32/build_demo/smart_parking_wokwi_demo_merged.bin --flash_mode dio --flash_freq 40m --flash_size 4MB 0x1000 /workspace/firmware/esp32/build_demo/bootloader/bootloader.bin 0x8000 /workspace/firmware/esp32/build_demo/partition_table/partition-table.bin 0x10000 /workspace/firmware/esp32/build_demo/smart_parking_esp32.bin && \
+              cp /workspace/firmware/esp32/README_WOKWI_DEMO.txt /workspace/firmware/esp32/build_demo/ && \
+              echo 'Both Production and Wokwi Demo builds completed successfully.'"
 
       - name: Upload Build Log on Failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: esp32-build-compiler-log
-          path: firmware/esp32/build_compiler.log
+          path: |
+            firmware/esp32/build_compiler_prod.log
+            firmware/esp32/build_compiler_demo.log
           if-no-files-found: ignore
 
       - name: Verify and list build artifacts
         run: |
           echo "=========================================="
-          echo "ESP32 FIRMWARE BUILD ARTIFACTS VERIFICATION"
+          echo "ESP32 PRODUCTION BUILD ARTIFACTS VERIFICATION"
           echo "=========================================="
           ls -lah firmware/esp32/build/
-          echo "Checking binary files..."
-          test -f firmware/esp32/build/smart_parking_esp32.bin && echo "[OK] smart_parking_esp32.bin exists"
-          test -f firmware/esp32/build/smart_parking_esp32_merged.bin && echo "[OK] smart_parking_esp32_merged.bin exists (Wokwi Web Ready)"
-          test -f firmware/esp32/build/smart_parking_esp32.elf && echo "[OK] smart_parking_esp32.elf exists"
-          test -f firmware/esp32/build/smart_parking_esp32.map && echo "[OK] smart_parking_esp32.map exists"
-          test -f firmware/esp32/build/flasher_args.json && echo "[OK] flasher_args.json exists"
-          test -f firmware/esp32/build/bootloader/bootloader.bin && echo "[OK] bootloader.bin exists"
-          test -f firmware/esp32/build/partition_table/partition-table.bin && echo "[OK] partition-table.bin exists"
+          test -f firmware/esp32/build/smart_parking_esp32.bin && echo "[OK] Production smart_parking_esp32.bin exists"
+          test -f firmware/esp32/build/smart_parking_esp32_merged.bin && echo "[OK] Production smart_parking_esp32_merged.bin exists"
+          test -f firmware/esp32/build/smart_parking_esp32.elf && echo "[OK] Production smart_parking_esp32.elf exists"
           echo "=========================================="
-          cat firmware/esp32/build/flasher_args.json
+          echo "WOKWI DEMO-ONLY BUILD ARTIFACTS VERIFICATION"
+          echo "=========================================="
+          ls -lah firmware/esp32/build_demo/
+          test -f firmware/esp32/build_demo/smart_parking_esp32.bin && echo "[OK] Demo smart_parking_esp32.bin exists"
+          test -f firmware/esp32/build_demo/smart_parking_wokwi_demo_merged.bin && echo "[OK] Demo smart_parking_wokwi_demo_merged.bin exists"
+          test -f firmware/esp32/build_demo/smart_parking_esp32.elf && echo "[OK] Demo smart_parking_esp32.elf exists"
+          test -f firmware/esp32/build_demo/README_WOKWI_DEMO.txt && echo "[OK] Demo README_WOKWI_DEMO.txt exists"
           echo "=========================================="
 
-      - name: Upload Firmware Artifacts
+      - name: Upload Production Firmware Artifact
         uses: actions/upload-artifact@v4
         with:
           name: esp32-firmware-binaries
@@ -71,7 +82,20 @@ jobs:
             firmware/esp32/build/flasher_args.json
             firmware/esp32/build/bootloader/bootloader.bin
             firmware/esp32/build/partition_table/partition-table.bin
-            firmware/esp32/build_compiler.log
+            firmware/esp32/build_compiler_prod.log
+          if-no-files-found: ignore
+
+      - name: Upload Wokwi Demo-Only Firmware Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-wokwi-demo-only
+          path: |
+            firmware/esp32/build_demo/smart_parking_wokwi_demo_merged.bin
+            firmware/esp32/build_demo/smart_parking_esp32.bin
+            firmware/esp32/build_demo/smart_parking_esp32.elf
+            firmware/esp32/build_demo/flasher_args.json
+            firmware/esp32/build_demo/README_WOKWI_DEMO.txt
+            firmware/esp32/build_compiler_demo.log
           if-no-files-found: ignore
 
   regression-tests:

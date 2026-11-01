@@ -123,6 +123,7 @@ static void barrier_task(void *pvParameters) {
     uint32_t clear_counter_ms[2] = {0, 0};
     const uint32_t poll_interval_ms = 100;
     const uint32_t required_clear_ms = 3000;
+    bool obstruction_logged[2] = {false, false};
 
     while (1) {
         for (int gate = 0; gate < 2; gate++) {
@@ -130,8 +131,18 @@ static void barrier_task(void *pvParameters) {
                 if (barrier_is_obstruction_detected((gate_id_t)gate)) {
                     // CÓ VẬT CẢN: Lập tức xóa bộ đếm đóng, bảo đảm không hạ barrier
                     clear_counter_ms[gate] = 0;
+                    if (!obstruction_logged[gate]) {
+                        ESP_LOGW(TAG, "Gate %s: Obstruction detected (IR Beam blocked)! SAFETY INTERLOCK ACTIVE: Barrier kept OPEN.",
+                                 (gate == GATE_ENTRY) ? "ENTRY" : "EXIT");
+                        obstruction_logged[gate] = true;
+                    }
                 } else {
                     // THÔNG THOÁNG: Tích lũy thời gian an toàn
+                    if (obstruction_logged[gate]) {
+                        ESP_LOGI(TAG, "Gate %s: Obstruction cleared. Resuming 3s safety close countdown.",
+                                 (gate == GATE_ENTRY) ? "ENTRY" : "EXIT");
+                        obstruction_logged[gate] = false;
+                    }
                     clear_counter_ms[gate] += poll_interval_ms;
                     if (clear_counter_ms[gate] >= required_clear_ms) {
                         barrier_close((gate_id_t)gate);
@@ -140,6 +151,7 @@ static void barrier_task(void *pvParameters) {
                 }
             } else {
                 clear_counter_ms[gate] = 0;
+                obstruction_logged[gate] = false;
             }
         }
         vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
@@ -182,7 +194,21 @@ static void display_task(void *pvParameters) {
             xSemaphoreGive(g_telemetry_mutex);
         }
 
-        display_lcd_show_status(free_slots, "PARKING ONLINE");
+        if (barrier_get_state(GATE_ENTRY) == BARRIER_OPEN) {
+            if (barrier_is_obstruction_detected(GATE_ENTRY)) {
+                display_lcd_show_status(free_slots, "ENTRY OBSTRUCT");
+            } else {
+                display_lcd_show_status(free_slots, "ENTRY GATE OPEN");
+            }
+        } else if (barrier_get_state(GATE_EXIT) == BARRIER_OPEN) {
+            if (barrier_is_obstruction_detected(GATE_EXIT)) {
+                display_lcd_show_status(free_slots, "EXIT OBSTRUCT");
+            } else {
+                display_lcd_show_status(free_slots, "EXIT GATE OPEN");
+            }
+        } else {
+            display_lcd_show_status(free_slots, "PARKING ONLINE");
+        }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -192,10 +218,18 @@ static void display_task(void *pvParameters) {
 // ==============================================================================
 
 void app_main(void) {
-    ESP_LOGI(TAG, "=====================================================");
-    ESP_LOGI(TAG, "  SMART PARKING SYSTEM — ESP32 EMBEDDED FIRMWARE     ");
-    ESP_LOGI(TAG, "  Architecture: FreeRTOS Symmetric Multiprocessing    ");
-    ESP_LOGI(TAG, "=====================================================");
+#if defined(CONFIG_SMART_PARKING_WOKWI_DEMO_ONLY) || defined(CONFIG_SMART_PARKING_SIMULATION_OFFLINE_DEMO)
+    ESP_LOGW(TAG, "============================================================");
+    ESP_LOGW(TAG, "  MODE: WOKWI STANDALONE DEMO ONLY (OFFLINE OVERRIDE ACTIVE)");
+    ESP_LOGW(TAG, "  WARNING: DO NOT FLASH THIS FIRMWARE TO PHYSICAL HARDWARE! ");
+    ESP_LOGW(TAG, "  Whitelisted Demo Cards: Entry=30:A1:23:45 | Exit=01:02:03:04");
+    ESP_LOGW(TAG, "============================================================");
+#else
+    ESP_LOGI(TAG, "============================================================");
+    ESP_LOGI(TAG, "  MODE: HARDWARE PRODUCTION MODE (FAIL-SAFE STRICTLY ENFORCED)");
+    ESP_LOGI(TAG, "  All barrier access strictly requires verified Backend authorization.");
+    ESP_LOGI(TAG, "============================================================");
+#endif
 
     // 1. Tạo khóa Mutex bảo vệ dữ liệu telemetry
     g_telemetry_mutex = xSemaphoreCreateMutex();

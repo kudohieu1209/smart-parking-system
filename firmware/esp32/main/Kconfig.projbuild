@@ -20,14 +20,25 @@ menu "Smart Parking ESP32 Configuration"
         help
             Password for the Wi-Fi network. Keep empty for Wokwi-GUEST.
 
-    config SMART_PARKING_SIMULATION_OFFLINE_DEMO
-        bool "Enable Simulation Offline Demo RFID Override"
+    config SMART_PARKING_WOKWI_DEMO_ONLY
+        bool "WOKWI_DEMO_ONLY: Enable Standalone Wokwi Hardware Simulation Demo Mode"
         default n
         help
-            WARNING: FOR SIMULATION AND OFFLINE TESTING ONLY.
-            When enabled, whitelisted demo cards (30:A1:23:45 and 01:02:03:04)
-            are permitted even if Wi-Fi or Backend is disconnected.
-            Keep disabled (n) in production / real hardware mode.
+            WARNING: FOR WOKWI HARDWARE SIMULATION AND OFFLINE TESTING ONLY.
+            DO NOT FLASH THIS FIRMWARE BUILD TO PHYSICAL ESP32 HARDWARE.
+            When enabled (y):
+            - If Backend is unreachable (Wi-Fi disconnected OR Backend HTTP/DNS fails),
+              whitelisted demo RFID cards ("30:A1:23:45" for Entry, "01:02:03:04" for Exit)
+              are granted demo access to test Servo barriers and safety sensors in Wokwi.
+            - Unauthorized / non-whitelisted cards remain strictly rejected.
+            In Production / Hardware Mode, this option MUST be disabled (default n),
+            enforcing strict fail-safe rejection if Backend is offline.
+
+    config SMART_PARKING_SIMULATION_OFFLINE_DEMO
+        bool "Enable Simulation Offline Demo RFID Override (Legacy Alias)"
+        default n
+        help
+            Legacy alias for SMART_PARKING_WOKWI_DEMO_ONLY.
 
     config SMART_PARKING_RFID_DEBUG
         bool "Enable Detailed MFRC522 RFID Diagnostics Logging"

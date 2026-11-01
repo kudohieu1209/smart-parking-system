@@ -16,8 +16,17 @@
 #include "network_client.h"
 #include "pin_config.h"
 
-#if defined(CONFIG_SMART_PARKING_SIMULATION_OFFLINE_DEMO)
-#warning "SECURITY NOTICE: SMART_PARKING_SIMULATION_OFFLINE_DEMO is ENABLED. Only for Wokwi offline simulation. NEVER deploy to real hardware!"
+#if defined(CONFIG_SMART_PARKING_WOKWI_DEMO_ONLY) || defined(CONFIG_SMART_PARKING_SIMULATION_OFFLINE_DEMO)
+#warning "SECURITY NOTICE: WOKWI_DEMO_ONLY is ENABLED. Only for Wokwi offline simulation. NEVER deploy to real hardware!"
+static bool is_whitelisted_demo_card(gate_id_t gate, const char *card_uid) {
+    if (!card_uid) return false;
+    // Thẻ Demo Cổng Vào: 30:A1:23:45
+    // Thẻ Demo Cổng Ra:  01:02:03:04
+    if (strcmp(card_uid, "30:A1:23:45") == 0 || strcmp(card_uid, "01:02:03:04") == 0) {
+        return true;
+    }
+    return false;
+}
 #endif
 
 static const char *TAG = "NET_CLIENT";
@@ -156,22 +165,28 @@ esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_
     // NGUYÊN TẮC AN TOÀN FAIL-SAFE: Mặc định luôn từ chối cho đến khi Backend xác thực thành công
     if (out_allowed) *out_allowed = false;
 
-    // Khi chưa có kết nối Wi-Fi hoặc Backend chưa sẵn sàng:
+    // TRƯỜNG HỢP 1: Khi chưa có kết nối Wi-Fi hoặc Backend chưa sẵn sàng
     if (!g_wifi_connected) {
-#if defined(CONFIG_SMART_PARKING_SIMULATION_OFFLINE_DEMO)
-        // CHỈ cho phép thẻ demo override khi bật tường minh cờ biên dịch mô phỏng
-        if (card_uid && (strcmp(card_uid, "30:A1:23:45") == 0 || strcmp(card_uid, "01:02:03:04") == 0)) {
-            ESP_LOGW(TAG, "[OFFLINE DEMO OVERRIDE] Whitelisted card allowed in simulation mode: %s", card_uid);
+#if defined(CONFIG_SMART_PARKING_WOKWI_DEMO_ONLY) || defined(CONFIG_SMART_PARKING_SIMULATION_OFFLINE_DEMO)
+        // WOKWI_DEMO_ONLY: Cho phép thẻ demo whitelist override khi Wi-Fi chưa kết nối
+        if (is_whitelisted_demo_card(gate, card_uid)) {
+            ESP_LOGW(TAG, "[WOKWI_DEMO_ONLY] Whitelisted card allowed (Wi-Fi disconnected): %s", card_uid);
             if (out_allowed) *out_allowed = true;
-            if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Demo Verified (Offline Sim)");
+            if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Demo Verified (No Wi-Fi)");
             return ESP_OK;
+        } else {
+            ESP_LOGW(TAG, "[WOKWI_DEMO_ONLY] Non-whitelisted card rejected (Wi-Fi disconnected): %s", card_uid ? card_uid : "NULL");
+            if (out_allowed) *out_allowed = false;
+            if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Demo Denied - Not Whitelisted");
+            return ESP_ERR_INVALID_STATE;
         }
-#endif
-        // Hardware Mode: Bắt buộc từ chối xác thực khi Backend offline để đảm bảo an toàn tuyệt đối
-        ESP_LOGE(TAG, "Hardware Mode: Rejecting RFID tap while backend is offline: %s", card_uid ? card_uid : "NULL");
+#else
+        // HARDWARE PRODUCTION MODE: Bắt buộc từ chối xác thực tuyệt đối khi Wi-Fi offline
+        ESP_LOGE(TAG, "Hardware Mode Fail-safe: Rejecting RFID tap while Wi-Fi is disconnected: %s", card_uid ? card_uid : "NULL");
         if (out_allowed) *out_allowed = false;
         if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Backend Offline - Access Denied");
         return ESP_ERR_INVALID_STATE;
+#endif
     }
 
     // Kết nối HTTP tới Backend
@@ -214,14 +229,33 @@ esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_
     esp_http_client_cleanup(client);
     free(post_data);
 
+    // TRƯỜNG HỢP 2: Wi-Fi đã kết nối nhưng Backend HTTP thất bại (DNS, timeout, server down)
     if (err != ESP_OK || status_code != 200 || read_len <= 0) {
-        ESP_LOGE(TAG, "Backend HTTP communication failed: err=%s, status=%d, bytes=%d. Fail-safe: Barrier stays CLOSED.",
+        ESP_LOGE(TAG, "Backend HTTP communication failed: err=%s, status=%d, bytes=%d.",
                  esp_err_to_name(err), status_code, read_len);
+
+#if defined(CONFIG_SMART_PARKING_WOKWI_DEMO_ONLY) || defined(CONFIG_SMART_PARKING_SIMULATION_OFFLINE_DEMO)
+        // WOKWI_DEMO_ONLY: Cho phép thẻ demo whitelist override khi Backend HTTP không truy cập được
+        if (is_whitelisted_demo_card(gate, card_uid)) {
+            ESP_LOGW(TAG, "[WOKWI_DEMO_ONLY] Whitelisted card allowed (Backend HTTP unreachable): %s", card_uid);
+            if (out_allowed) *out_allowed = true;
+            if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Demo Verified (Offline HTTP)");
+            return ESP_OK;
+        } else {
+            ESP_LOGW(TAG, "[WOKWI_DEMO_ONLY] Non-whitelisted card rejected (Backend HTTP unreachable): %s", card_uid ? card_uid : "NULL");
+            if (out_allowed) *out_allowed = false;
+            if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Demo Denied - Not Whitelisted");
+            return ESP_FAIL;
+        }
+#else
+        // HARDWARE PRODUCTION MODE FAIL-SAFE: Giữ nguyên barrier đóng khi Backend lỗi
+        ESP_LOGE(TAG, "Hardware Mode Fail-safe: Backend communication failed. Barrier stays CLOSED.");
         if (out_allowed) *out_allowed = false;
         if (out_msg && msg_len > 0) {
             snprintf(out_msg, msg_len, "Backend Error (HTTP %d)", status_code);
         }
         return (err != ESP_OK) ? err : ESP_FAIL;
+#endif
     }
 
     // Phân tích phản hồi JSON từ FastAPI
