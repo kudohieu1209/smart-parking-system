@@ -44,10 +44,18 @@ class ParkingService:
                 RFIDCard(card_uid="RFID-DEMO-02", owner_name="Tran Thi Binh", vehicle_plate="29C-678.90", card_type="VIP"),
                 RFIDCard(card_uid="RFID-DEMO-03", owner_name="Le Van Cuong", vehicle_plate="51F-345.67", card_type="STANDARD"),
                 RFIDCard(card_uid="RFID-DEMO-04", owner_name="Pham Thi Dung", vehicle_plate="43A-888.88", card_type="STANDARD"),
+                RFIDCard(card_uid="30:A1:23:45", owner_name="Doan Minh Duc", vehicle_plate="30A-123.45", card_type="VIP"),
+                RFIDCard(card_uid="01:02:03:04", owner_name="Vu Hoang Long", vehicle_plate="29C-678.90", card_type="STANDARD"),
             ]
             db.add_all(demo_cards)
             db.commit()
-            logger.info("Created 4 demo RFID cards")
+            logger.info("Created 6 demo and Wokwi hardware RFID cards")
+        else:
+            # Đảm bảo các thẻ Wokwi chuẩn hóa luôn có sẵn trong cơ sở dữ liệu
+            for uid, name, plate in [("30:A1:23:45", "Doan Minh Duc", "30A-123.45"), ("01:02:03:04", "Vu Hoang Long", "29C-678.90")]:
+                if not db.query(RFIDCard).filter(RFIDCard.card_uid == uid).first():
+                    db.add(RFIDCard(card_uid=uid, owner_name=name, vehicle_plate=plate, card_type="STANDARD"))
+            db.commit()
 
     @staticmethod
     def get_all_slots(db: Session):
@@ -70,10 +78,30 @@ class ParkingService:
         return max(settings.MINIMUM_FEE, hours * settings.HOURLY_RATE)
 
     @staticmethod
+    def _find_card(db: Session, raw_uid: str) -> Optional[RFIDCard]:
+        """Tìm kiếm thẻ RFID với khả năng chuẩn hóa linh hoạt định dạng hex (có hoặc không có dấu hai chấm/gạch ngang)."""
+        if not raw_uid:
+            return None
+        clean_uid = raw_uid.strip().upper()
+        candidates = {clean_uid, clean_uid.replace(":", ""), clean_uid.replace("-", "")}
+        if len(clean_uid) == 8 and ":" not in clean_uid and "-" not in clean_uid:
+            candidates.add(":".join([clean_uid[i:i+2] for i in range(0, 8, 2)]))
+
+        card = db.query(RFIDCard).filter(RFIDCard.card_uid.in_(candidates)).first()
+        if card:
+            return card
+
+        target_norm = clean_uid.replace(":", "").replace("-", "")
+        for c in db.query(RFIDCard).all():
+            if c.card_uid.replace(":", "").replace("-", "").upper() == target_norm:
+                return c
+        return None
+
+    @staticmethod
     async def process_entry_tap(db: Session, tap: CardTapRequest) -> GateTapResponse:
         """Quy tắc xử lý quẹt thẻ vào cổng (Check-in) với khóa đồng bộ tránh race conditions."""
         async with ParkingService._entry_lock:
-            card = db.query(RFIDCard).filter(RFIDCard.card_uid == tap.card_uid).first()
+            card = ParkingService._find_card(db, tap.card_uid)
             if not card or not card.is_active:
                 reason = "CARD_INACTIVE" if card and not card.is_active else "CARD_UNKNOWN"
                 msg = "Thẻ đã bị khóa hoặc ngừng kích hoạt." if reason == "CARD_INACTIVE" else "Thẻ không hợp lệ hoặc chưa từng đăng ký."
@@ -92,7 +120,7 @@ class ParkingService:
 
             # Kiểm tra Anti-passback: Thẻ đang có phiên ACTIVE hay không
             active_session = db.query(ParkingSession).filter(
-                ParkingSession.card_uid == tap.card_uid,
+                ParkingSession.card_uid == card.card_uid,
                 ParkingSession.status == "ACTIVE"
             ).first()
             if active_session:
@@ -169,7 +197,7 @@ class ParkingService:
     @staticmethod
     async def process_exit_tap(db: Session, tap: CardTapRequest) -> GateTapResponse:
         """Quy tắc xử lý quẹt thẻ ra cổng (Check-out)."""
-        card = db.query(RFIDCard).filter(RFIDCard.card_uid == tap.card_uid).first()
+        card = ParkingService._find_card(db, tap.card_uid)
         if not card:
             return GateTapResponse(
                 status="REJECTED",
@@ -189,7 +217,7 @@ class ParkingService:
             )
 
         active_session = db.query(ParkingSession).filter(
-            ParkingSession.card_uid == tap.card_uid,
+            ParkingSession.card_uid == card.card_uid,
             ParkingSession.status == "ACTIVE"
         ).order_by(ParkingSession.entry_time.desc()).first()
 

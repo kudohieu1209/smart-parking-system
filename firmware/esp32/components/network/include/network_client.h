@@ -26,6 +26,11 @@ esp_err_t network_client_init(void);
 bool network_client_is_connected(void);
 
 /**
+ * @brief Thiết lập động địa chỉ Backend REST API URL (thay vì cố định).
+ */
+void network_client_set_backend_url(const char *url);
+
+/**
  * @brief Gửi số liệu cảm biến siêu âm của 4 ô đỗ lên FastAPI Backend (/api/v1/telemetry/sensors).
  */
 esp_err_t network_send_telemetry(const slot_telemetry_t slots[MAX_SLOTS]);

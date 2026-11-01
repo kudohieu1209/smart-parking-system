@@ -19,6 +19,15 @@
 static const char *TAG = "NET_CLIENT";
 
 static bool g_wifi_connected = false;
+static char s_backend_url[128] = BACKEND_BASE_URL_DEFAULT;
+
+void network_client_set_backend_url(const char *url) {
+    if (url && strlen(url) > 0) {
+        strncpy(s_backend_url, url, sizeof(s_backend_url) - 1);
+        s_backend_url[sizeof(s_backend_url) - 1] = '\0';
+        ESP_LOGI(TAG, "Backend URL configured to: %s", s_backend_url);
+    }
+}
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
@@ -112,7 +121,7 @@ esp_err_t network_send_telemetry(const slot_telemetry_t slots[MAX_SLOTS]) {
     if (!post_data) return ESP_ERR_NO_MEM;
 
     char url[128];
-    snprintf(url, sizeof(url), "%s/telemetry/sensors", BACKEND_BASE_URL_DEFAULT);
+    snprintf(url, sizeof(url), "%s/telemetry/sensors", s_backend_url);
 
     esp_http_client_config_t config = {
         .url = url,
@@ -138,23 +147,25 @@ esp_err_t network_send_telemetry(const slot_telemetry_t slots[MAX_SLOTS]) {
 
 esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_allowed, char *out_msg, size_t msg_len) {
     ESP_LOGI(TAG, "Transmitting RFID tap to Backend: Gate=%s, Card=%s",
-             (gate == GATE_ENTRY) ? "ENTRY" : "EXIT", card_uid);
+             (gate == GATE_ENTRY) ? "ENTRY" : "EXIT", card_uid ? card_uid : "NULL");
 
     // NGUYÊN TẮC AN TOÀN FAIL-SAFE: Mặc định luôn từ chối cho đến khi Backend xác thực thành công
     if (out_allowed) *out_allowed = false;
 
-    // Khi chưa có kết nối Wi-Fi thực tế (VD: chạy Wokwi standalone chưa qua gateway):
+    // Khi chưa có kết nối Wi-Fi hoặc Backend chưa sẵn sàng:
     if (!g_wifi_connected) {
-        ESP_LOGW(TAG, "Wi-Fi not connected! Running in Standalone Fail-safe mode.");
-
-        // Trong chế độ giả lập độc lập: chấp nhận thẻ mẫu DEMO-01 hoặc DEMO-02 để kiểm thử cơ chế đóng mở
-        if (card_uid && (strstr(card_uid, "30A") != NULL || strstr(card_uid, "01:02:03:04") != NULL || strstr(card_uid, "DEMO") != NULL)) {
-            ESP_LOGI(TAG, "[Offline Mock] Demo card recognized in standalone mode: %s", card_uid);
+#if defined(CONFIG_SMART_PARKING_SIMULATION_OFFLINE_DEMO)
+        // CHỈ cho phép thẻ demo override khi bật tường minh cờ biên dịch mô phỏng
+        if (card_uid && (strcmp(card_uid, "30:A1:23:45") == 0 || strcmp(card_uid, "01:02:03:04") == 0)) {
+            ESP_LOGW(TAG, "[OFFLINE DEMO OVERRIDE] Whitelisted card allowed in simulation mode: %s", card_uid);
             if (out_allowed) *out_allowed = true;
-            if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Demo Verified (Standalone)");
+            if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Demo Verified (Offline Sim)");
             return ESP_OK;
         }
-
+#endif
+        // Hardware Mode: Bắt buộc từ chối xác thực khi Backend offline để đảm bảo an toàn tuyệt đối
+        ESP_LOGE(TAG, "Hardware Mode: Rejecting RFID tap while backend is offline: %s", card_uid ? card_uid : "NULL");
+        if (out_allowed) *out_allowed = false;
         if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Backend Offline - Access Denied");
         return ESP_ERR_INVALID_STATE;
     }
@@ -162,7 +173,7 @@ esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_
     // Kết nối HTTP tới Backend
     char url[128];
     const char *endpoint = (gate == GATE_ENTRY) ? "/gate/entry-tap" : "/gate/exit-tap";
-    snprintf(url, sizeof(url), "%s%s", BACKEND_BASE_URL_DEFAULT, endpoint);
+    snprintf(url, sizeof(url), "%s%s", s_backend_url, endpoint);
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "card_uid", card_uid);
@@ -196,6 +207,7 @@ esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to connect to backend: %s. Fail-safe: Barrier stays CLOSED.", esp_err_to_name(err));
+        if (out_allowed) *out_allowed = false;
         if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Backend Unreachable");
         return err;
     }
@@ -204,21 +216,21 @@ esp_err_t network_send_rfid_tap(gate_id_t gate, const char *card_uid, bool *out_
     cJSON *resp_json = cJSON_Parse(response_buffer);
     if (!resp_json) {
         ESP_LOGE(TAG, "Invalid JSON received from backend: %s", response_buffer);
+        if (out_allowed) *out_allowed = false;
+        if (out_msg && msg_len > 0) snprintf(out_msg, msg_len, "Invalid Response");
         return ESP_ERR_INVALID_RESPONSE;
     }
 
     cJSON *status_item = cJSON_GetObjectItem(resp_json, "status");
     cJSON *msg_item = cJSON_GetObjectItem(resp_json, "message");
 
-    if (status_item && cJSON_IsString(status_item)) {
-        if (strcmp(status_item->valuestring, "ALLOWED") == 0) {
-            if (out_allowed) *out_allowed = true;
-            ESP_LOGI(TAG, "Backend Authorization: ALLOWED -> Opening barrier.");
-        } else {
-            if (out_allowed) *out_allowed = false;
-            ESP_LOGW(TAG, "Backend Authorization: REJECTED (%s) -> Keeping barrier closed.",
-                     msg_item ? msg_item->valuestring : "Denied");
-        }
+    if (status_item && cJSON_IsString(status_item) && strcmp(status_item->valuestring, "ALLOWED") == 0) {
+        if (out_allowed) *out_allowed = true;
+        ESP_LOGI(TAG, "Backend Authorization: ALLOWED -> Opening barrier.");
+    } else {
+        if (out_allowed) *out_allowed = false;
+        ESP_LOGW(TAG, "Backend Authorization: REJECTED (%s) -> Keeping barrier closed.",
+                 (msg_item && cJSON_IsString(msg_item)) ? msg_item->valuestring : "Denied");
     }
 
     if (out_msg && msg_len > 0 && msg_item && cJSON_IsString(msg_item)) {

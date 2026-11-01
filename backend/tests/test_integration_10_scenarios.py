@@ -475,3 +475,45 @@ def test_10_high_concurrency_race_condition():
         verify_db.close()
 
     asyncio.run(run_concurrent_test())
+
+
+# ==============================================================================
+# TEST 11: Wokwi & Hardware Standardized Hex RFID Card Formats
+# ==============================================================================
+def test_11_wokwi_standardized_hex_rfid_cards(client):
+    """Test standardized 4-byte hexadecimal RFID UIDs (both colon and plain hex) in Wokwi & hardware mode."""
+    # 1. Entry tap with colon format "30:A1:23:45"
+    resp = client.post("/api/v1/gate/entry-tap", json={"card_uid": "30:A1:23:45", "gate_id": "ENTRY"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ALLOWED"
+    assert data["action"] == "OPEN_BARRIER"
+    assert data["session"]["status"] == "ACTIVE"
+
+    # 2. Anti-passback test using plain hex format without colons "30A12345"
+    resp_dup = client.post("/api/v1/gate/entry-tap", json={"card_uid": "30A12345", "gate_id": "ENTRY"})
+    assert resp_dup.status_code == 200
+    data_dup = resp_dup.json()
+    assert data_dup["status"] == "REJECTED"
+    assert data_dup["reason"] == "CARD_ALREADY_IN_USE"
+
+    # 3. Exit tap with plain hex format "30A12345"
+    resp_exit = client.post("/api/v1/gate/exit-tap", json={"card_uid": "30A12345", "gate_id": "EXIT"})
+    assert resp_exit.status_code == 200
+    data_exit = resp_exit.json()
+    assert data_exit["status"] == "ALLOWED"
+    assert data_exit["action"] == "OPEN_BARRIER"
+    assert data_exit["session"]["status"] == "COMPLETED"
+
+    # 4. Entry and exit tap with second hardware/Wokwi card "01:02:03:04"
+    resp_entry2 = client.post("/api/v1/gate/entry-tap", json={"card_uid": "01:02:03:04", "gate_id": "ENTRY"})
+    assert resp_entry2.status_code == 200
+    assert resp_entry2.json()["status"] == "ALLOWED"
+    assert resp_entry2.json()["action"] == "OPEN_BARRIER"
+
+    resp_exit2 = client.post("/api/v1/gate/exit-tap", json={"card_uid": "01:02:03:04", "gate_id": "EXIT"})
+    assert resp_exit2.status_code == 200
+    assert resp_exit2.json()["status"] == "ALLOWED"
+    assert resp_exit2.json()["action"] == "OPEN_BARRIER"
+    assert resp_exit2.json()["session"]["status"] == "COMPLETED"
+

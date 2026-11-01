@@ -71,9 +71,23 @@ extern "C" {
 // ==============================================================================
 // 6. CẤU HÌNH MẠNG WI-FI & BACKEND
 // ==============================================================================
+#ifdef CONFIG_SMART_PARKING_WIFI_SSID
+#define WIFI_SSID_DEFAULT          CONFIG_SMART_PARKING_WIFI_SSID
+#else
 #define WIFI_SSID_DEFAULT          "Wokwi-GUEST"  // Mạng Wi-Fi ảo của Wokwi Simulator
+#endif
+
+#ifdef CONFIG_SMART_PARKING_WIFI_PASSWORD
+#define WIFI_PASS_DEFAULT          CONFIG_SMART_PARKING_WIFI_PASSWORD
+#else
 #define WIFI_PASS_DEFAULT          ""
-#define BACKEND_BASE_URL_DEFAULT   "http://10.0.2.2:8000/api/v1" // Host gateway trong mạng ảo
+#endif
+
+#ifdef CONFIG_SMART_PARKING_BACKEND_URL
+#define BACKEND_BASE_URL_DEFAULT   CONFIG_SMART_PARKING_BACKEND_URL
+#else
+#define BACKEND_BASE_URL_DEFAULT   "http://10.0.2.2:8000/api/v1" // Host gateway trong mạng ảo Wokwi (10.0.2.2 trỏ về localhost máy tính)
+#endif
 
 #ifdef __cplusplus
 }

@@ -22,7 +22,7 @@
       "id": "rfid_entry",
       "top": 200,
       "left": -220,
-      "attrs": { "uid": "30A12345" }
+      "attrs": { "uid": "30:A1:23:45" }
     },
     {
       "type": "wokwi-servo",

@@ -43,14 +43,14 @@
       "id": "rfid_entry",
       "top": 240,
       "left": -260,
-      "attrs": { "uid": "30A12345" }
+      "attrs": { "uid": "30:A1:23:45" }
     },
     {
       "type": "board-mfrc522",
       "id": "rfid_exit",
       "top": 240,
       "left": -60,
-      "attrs": { "uid": "30A12345" }
+      "attrs": { "uid": "01:02:03:04" }
     },
     {
       "type": "wokwi-servo",
