@@ -222,7 +222,7 @@ static esp_err_t mfrc522_to_card(spi_device_handle_t spi, uint8_t cmd,
     int timeout = 250;
     uint8_t n = 0;
     do {
-        ets_delay_us(100);
+        esp_rom_delay_us(100);
         n = mfrc522_read_reg(spi, ComIrqReg);
         timeout--;
     } while ((timeout > 0) && !(n & 0x01) && !(n & wait_irq));

@@ -34,9 +34,9 @@ static esp_err_t pcf8574_write_byte(uint8_t data) {
 
 static void lcd_pulse_enable(uint8_t nibble) {
     pcf8574_write_byte(nibble | LCD_EN_BIT | g_backlight);
-    ets_delay_us(5);
+    esp_rom_delay_us(5);
     pcf8574_write_byte((nibble & ~LCD_EN_BIT) | g_backlight);
-    ets_delay_us(50);
+    esp_rom_delay_us(50);
 }
 
 static void lcd_send_nibble(uint8_t nibble, uint8_t rs) {
@@ -106,11 +106,11 @@ esp_err_t display_lcd_init(void) {
     lcd_send_nibble(0x30, 0);
     vTaskDelay(pdMS_TO_TICKS(5));
     lcd_send_nibble(0x30, 0);
-    ets_delay_us(150);
+    esp_rom_delay_us(150);
     lcd_send_nibble(0x30, 0);
-    ets_delay_us(150);
+    esp_rom_delay_us(150);
     lcd_send_nibble(0x20, 0); // Đặt chế độ 4-bit
-    ets_delay_us(150);
+    esp_rom_delay_us(150);
 
     lcd_send_cmd(0x28); // 2 dòng, font 5x8
     lcd_send_cmd(0x0C); // Bật hiển thị, tắt con trỏ

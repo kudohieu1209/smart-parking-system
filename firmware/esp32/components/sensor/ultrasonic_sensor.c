@@ -82,9 +82,9 @@ esp_err_t ultrasonic_sensor_read_slot(int slot_index, float *out_distance_cm, bo
 
     // 1. Phát xung Trigger 10µs chính xác
     gpio_set_level(trig, 0);
-    ets_delay_us(4);
+    esp_rom_delay_us(4);
     gpio_set_level(trig, 1);
-    ets_delay_us(10);
+    esp_rom_delay_us(10);
     gpio_set_level(trig, 0);
 
     // 2. Chờ chân Echo lên mức HIGH với hardware timer
@@ -165,7 +165,7 @@ esp_err_t ultrasonic_sensor_read_all(slot_telemetry_t slots[MAX_SLOTS]) {
             slots[i].occupied = g_last_occupied[i];
         }
         // Giãn cách 15ms giữa các ô đỗ để tránh phản xạ sóng âm chéo giữa các cảm biến cạnh nhau
-        ets_delay_us(15000);
+        esp_rom_delay_us(15000);
     }
     return ESP_OK;
 }
