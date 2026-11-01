@@ -33,12 +33,16 @@ jobs:
             espressif/idf:v5.3 \
             bash -c "set -o pipefail && idf.py build 2>&1 | tee /workspace/firmware/esp32/build_compiler.log"
 
-      - name: Show Compiler Log Tail on Failure
-        if: failure()
+      - name: Render Compiler Log to GitHub Step Summary
+        if: always()
         run: |
+          echo "## ESP32 Firmware Build Output Log" >> $GITHUB_STEP_SUMMARY
           if [ -f firmware/esp32/build_compiler.log ]; then
-            echo "=== RECENT COMPILER / LINKER LOG ==="
-            tail -n 120 firmware/esp32/build_compiler.log
+            echo '```text' >> $GITHUB_STEP_SUMMARY
+            tail -n 200 firmware/esp32/build_compiler.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No build_compiler.log generated." >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Verify and list build artifacts
@@ -59,6 +63,7 @@ jobs:
           echo "=========================================="
 
       - name: Upload Firmware Artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: esp32-firmware-binaries
@@ -70,7 +75,7 @@ jobs:
             firmware/esp32/build/bootloader/bootloader.bin
             firmware/esp32/build/partition_table/partition-table.bin
             firmware/esp32/build_compiler.log
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   regression-tests:
     name: Full System Regression Tests (Backend, Vision & Frontend)
